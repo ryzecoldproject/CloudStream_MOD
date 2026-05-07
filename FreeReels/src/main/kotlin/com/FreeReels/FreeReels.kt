@@ -2,7 +2,7 @@ package com.FreeReels
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.* // INI BARIS YANG HILANG KEMARIN!
+import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -29,11 +29,13 @@ class FreeReels : MainAPI() {
     private var sessionToken: String? = null
     private var sessionSecret: String? = null
 
-    // Menggunakan ID Tab khusus Native Android (503 = Popular)
+    // ID Kategori 100% Akurat dari API Native
     override val mainPage = mainPageOf(
         "503" to "Populer",
-        "504" to "Segera Hadir",
-        "505" to "Perempuan",
+        "505" to "New",
+        "622" to "Segera hadir",
+        "516" to "Dubbing",
+        "504" to "Perempuan",
         "506" to "Laki-Laki"
     )
 
@@ -54,8 +56,9 @@ class FreeReels : MainAPI() {
             "content-type" to "application/json",
             "device" to "android",
             "device-id" to deviceId,
+            "language" to "id-ID", // Jimat untuk Poster & Judul Bahasa Indonesia
             "user-agent" to "okhttp/4.9.2",
-            "internal-user-code" to "666666" // Jimat Penembus VIP
+            "internal-user-code" to "666666" // Jimat Penembus VIP Tanpa Koin
         )
     }
 
@@ -120,7 +123,7 @@ class FreeReels : MainAPI() {
         ensureSession()
         val seriesId = url.split("/").last()
         
-        // Coba rute info_v2 terlebih dahulu
+        // Coba rute info_v2 terlebih dahulu (Rute Utama Native)
         var res = app.get("$nativeApiUrl/drama/info_v2?series_id=$seriesId", headers = getNativeHeaders()).text
         var info = tryParseJson<NativeDetailResponse>(res)?.data?.info
         
@@ -147,7 +150,7 @@ class FreeReels : MainAPI() {
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val ep = tryParseJson<NativeEpisode>(data) ?: return false
         
-        // Di API Native, link VIP sudah langsung tersedia di sini!
+        // Di API Native, link VIP sudah langsung tersedia di sini secara telanjang bulat!
         val videoUrl = ep.externalAudioH264 ?: ep.externalAudioH265 ?: ep.m3u8Url ?: ep.videoUrl
         
         if (!videoUrl.isNullOrBlank()) {
@@ -178,7 +181,7 @@ class FreeReels : MainAPI() {
 }
 
 // ==========================================
-// DATA MODELS (PURE NATIVE)
+// DATA MODELS (PURE NATIVE - TIDAK PERLU DECRYPT/ENCRYPT)
 // ==========================================
 data class NativeAuthResponse(@JsonProperty("data") val data: AuthData?)
 data class AuthData(@JsonProperty("auth_key") val authKey: String?, @JsonProperty("auth_secret") val authSecret: String?, @JsonProperty("token") val token: String?)
