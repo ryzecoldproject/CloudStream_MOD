@@ -31,11 +31,10 @@ class FreeReels : MainAPI() {
     private var sessionSecret: String? = null
     private val sessionLock = Mutex()
 
-    // ID Kategori 100% Akurat dengan Server
+    // Segera Hadir Resmi Dihapus! UI jadi jauh lebih bersih.
     override val mainPage = mainPageOf(
         "503_10000" to "Populer",
         "505_10001" to "New",
-        "622_10002" to "Segera hadir",
         "516_10003" to "Dubbing",
         "504_10004" to "Perempuan",
         "506_10005" to "Laki-Laki"
@@ -46,7 +45,7 @@ class FreeReels : MainAPI() {
         return md.digest(input.toByteArray()).joinToString("") { "%02x".format(it) }
     }
 
-    // STRATEGI NINJA: isVip default false, hanya dinyalakan saat memuat video!
+    // STRATEGI NINJA: Jimat VIP cuma aktif saat buka video!
     private fun getNativeHeaders(isVip: Boolean = false): MutableMap<String, String> {
         val ts = System.currentTimeMillis()
         val signature = md5(authSalt + (sessionSecret ?: ""))
@@ -62,9 +61,8 @@ class FreeReels : MainAPI() {
             "user-agent" to "okhttp/4.9.2"
         )
         
-        // HANYA SELIPKAN JIMAT INI SAAT MEMUAT VIDEO (MENCEGAH SERVER MEMBLOKIR HOMEPAGE)
         if (isVip) {
-            headers["internal-user-code"] = "666666" 
+            headers["internal-user-code"] = "666666" // Bypass Episode Berbayar
         }
         
         return headers
@@ -86,32 +84,22 @@ class FreeReels : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         ensureSession()
         
+        // Halaman kategori Native tidak di-scroll agar rapi
+        if (page > 1) return newHomePageResponse(request.name, emptyList(), hasNext = false)
+
         val keys = request.data.split("_")
         val tabKey = keys[0]
         val posIndex = keys.getOrNull(1) ?: "10000"
-        val isComingSoon = tabKey == "622"
+        
+        val url = "$nativeApiUrl/homepage/v2/tab/index?tab_key=$tabKey&position_index=$posIndex&rec_trigger=0"
+        val res = app.get(url, headers = getNativeHeaders()).text // TANPA JIMAT VIP!
         
         val searchItems = mutableListOf<NativeItem>()
-        var hasMore = false
-
-        val res = if (isComingSoon) {
-            val nextToken = if (page == 1) "" else "offset=${(page - 1) * 20}&page_size=20"
-            val url = "$nativeApiUrl/coming-soon/list?next=$nextToken"
-            app.get(url, headers = getNativeHeaders()).text // TANPA VIP
-        } else {
-            if (page > 1) return newHomePageResponse(request.name, emptyList(), hasNext = false)
-            val url = "$nativeApiUrl/homepage/v2/tab/index?tab_key=$tabKey&position_index=$posIndex&rec_trigger=0"
-            app.get(url, headers = getNativeHeaders()).text // TANPA VIP
-        }
 
         try {
             val dataObj = tryParseJson<NativeFeedResponse>(res)?.data
             
-            if (isComingSoon) {
-                hasMore = dataObj?.pageInfo?.hasMore ?: false
-            }
-
-            // Menyedot dari semua tempat yang mungkin menggunakan Data Class
+            // Mesin Penyedot Elegan (Buka semua kotak/modul)
             dataObj?.items?.let { searchItems.addAll(it) }
             dataObj?.list?.let { searchItems.addAll(it) }
             
@@ -130,33 +118,31 @@ class FreeReels : MainAPI() {
         
         val items = searchItems.mapNotNull { item -> 
             val title = item.title ?: item.name ?: return@mapNotNull null
-            // Mengubah tipe ID menjadi String dengan aman (Mencegah crash Kotlin)
             val idStr = item.id?.toString() ?: item.key ?: item.seriesId?.toString() ?: return@mapNotNull null
             
+            // Filter cerdas membuang banner
             if (title.equals("Ranking", ignoreCase = true) || title.equals("Peringkat", ignoreCase = true) || title.equals("Top", ignoreCase = true)) {
                 return@mapNotNull null
             }
             
-            val targetUrl = if (isComingSoon) "coming_soon|$idStr" else idStr
-            
             val hasIndoAudio = item.episodeInfo?.audio?.contains("id-ID") == true
             val isDubbed = hasIndoAudio || title.contains("Dubbed", true) || title.contains("Sulih Suara", true)
             
-            newAnimeSearchResponse(title, targetUrl, TvType.AsianDrama) { 
+            newAnimeSearchResponse(title, idStr, TvType.AsianDrama) { 
                 this.posterUrl = fixUrlNull(item.cover ?: item.verticalCover)
             }.apply { 
                 if (isDubbed) addDubStatus(DubStatus.Dubbed) 
             }
         }
 
-        return newHomePageResponse(request.name, items, hasNext = hasMore)
+        return newHomePageResponse(request.name, items, hasNext = false)
     }
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
         ensureSession()
         val nextToken = if (page == 1) "" else "offset=${(page - 1) * 20}&page_size=20"
         val reqBody = mapOf("keyword" to query, "next" to nextToken).toJson().toRequestBody("application/json".toMediaTypeOrNull())
-        val res = app.post("$nativeApiUrl/search/drama", headers = getNativeHeaders(), requestBody = reqBody).text // TANPA VIP
+        val res = app.post("$nativeApiUrl/search/drama", headers = getNativeHeaders(), requestBody = reqBody).text
         
         val searchItems = mutableListOf<NativeItem>()
         var hasMore = false
@@ -193,10 +179,9 @@ class FreeReels : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         ensureSession()
         
-        val isComingSoon = url.startsWith("coming_soon|")
-        val seriesId = url.substringAfter("coming_soon|").split("/").last()
+        val seriesId = url.split("/").last()
         
-        // PANGGIL JIMAT VIP DI SINI AGAR BISA AKSES SEMUA EPISODE BERBAYAR!
+        // MEMAKAI JIMAT VIP (isVip = true) UNTUK MENGAMBIL VIDEO BERBAYAR SECARA GRATIS!
         var res = app.get("$nativeApiUrl/drama/info_v2?series_id=$seriesId", headers = getNativeHeaders(isVip = true)).text
         var info = tryParseJson<NativeDetailResponse>(res)?.data?.info
         
@@ -206,9 +191,6 @@ class FreeReels : MainAPI() {
         }
 
         val episodeList = info.episodeList?.mapNotNull { ep -> 
-            val hasVideo = !ep.externalAudioH264.isNullOrBlank() || !ep.m3u8Url.isNullOrBlank() || !ep.videoUrl.isNullOrBlank()
-            if (isComingSoon && !hasVideo) return@mapNotNull null
-
             newEpisode(ep.toJson()) {
                 this.name = ep.name ?: "Episode ${ep.index}"
                 this.episode = ep.index
@@ -218,8 +200,6 @@ class FreeReels : MainAPI() {
         return newTvSeriesLoadResponse(info.name ?: "Drama", url, TvType.AsianDrama, episodeList) {
             this.posterUrl = fixUrlNull(info.cover ?: info.verticalCover)
             this.plot = info.desc
-            // Ini akan membuat status tombol menjadi "Segera Hadir" (Upcoming) jika tidak ada episode
-            this.comingSoon = isComingSoon || episodeList.isEmpty()
         }
     }
 
@@ -274,7 +254,6 @@ data class NativeComponent(
 data class PageInfo(@JsonProperty("has_more") val hasMore: Boolean?)
 
 data class NativeItem(
-    // Menggunakan "Any?" agar CloudStream tidak crash jika server mengirim angka/integer
     @JsonProperty("id") val id: Any?, 
     @JsonProperty("key") val key: String?, 
     @JsonProperty("series_id") val seriesId: Any?, 
