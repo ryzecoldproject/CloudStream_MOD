@@ -31,13 +31,12 @@ class FreeReels : MainAPI() {
     private var sessionSecret: String? = null
     private val sessionLock = Mutex()
 
-    // Membawa 3 Kunci sekaligus (ID Angka, Nama String, Posisi) untuk Infinite Scroll
     override val mainPage = mainPageOf(
-        "503_popular_10000" to "Populer",
-        "505_new_10001" to "New",
-        "516_dubbing_10003" to "Dubbing",
-        "504_female_10004" to "Perempuan",
-        "506_male_10005" to "Laki-Laki"
+        "503_10000" to "Populer",
+        "505_10001" to "New",
+        "516_10003" to "Dubbing",
+        "504_10004" to "Perempuan",
+        "506_10005" to "Laki-Laki"
     )
 
     private fun md5(input: String): String {
@@ -61,7 +60,7 @@ class FreeReels : MainAPI() {
         )
         
         if (isVip) {
-            headers["internal-user-code"] = "666666" // Jimat Bypass VIP
+            headers["internal-user-code"] = "666666" 
         }
         
         return headers
@@ -85,81 +84,68 @@ class FreeReels : MainAPI() {
         ensureSession()
         
         val keys = request.data.split("_")
-        val tabId = keys[0]
-        val tabString = keys.getOrNull(1) ?: ""
-        val posIndex = keys.getOrNull(2) ?: "10000"
+        val tabKey = keys[0]
+        val posIndex = keys.getOrNull(1) ?: "10000"
         
-        val rawItems = mutableListOf<Map<*, *>>()
-        var hasMore = false
-
-        if (page == 1) {
-            // PAGE 1: Memuat Layout UI Beranda Utama
-            val url = "$nativeApiUrl/homepage/v2/tab/index?tab_key=$tabId&position_index=$posIndex&rec_trigger=0"
-            val res = app.get(url, headers = getNativeHeaders(isVip = false)).text 
-            
-            try {
-                val parsedData = tryParseJson<Map<String, Any>>(res)
-                val dataObj = parsedData?.get("data") as? Map<*, *>
-                
-                val components = (dataObj?.get("components") as? List<*>) ?: (dataObj?.get("modules") as? List<*>)
-                if (components != null) {
-                    components.filterIsInstance<Map<*, *>>().forEach { comp ->
-                        (comp["items"] as? List<*>)?.filterIsInstance<Map<*, *>>()?.let { rawItems.addAll(it) }
-                        (comp["list"] as? List<*>)?.filterIsInstance<Map<*, *>>()?.let { rawItems.addAll(it) }
-                    }
-                } else {
-                    (dataObj?.get("items") as? List<*>)?.filterIsInstance<Map<*, *>>()?.let { rawItems.addAll(it) }
-                    (dataObj?.get("list") as? List<*>)?.filterIsInstance<Map<*, *>>()?.let { rawItems.addAll(it) }
-                }
-                hasMore = true // Buka akses untuk lanjut ke halaman 2
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+        // Logika Oper Gigi (Infinite Scroll)
+        val offset = (page - 1) * 10
+        val url = if (page == 1) {
+            "$nativeApiUrl/homepage/v2/tab/index?tab_key=$tabKey&position_index=$posIndex&rec_trigger=0"
         } else {
-            // PAGE 2+: Oper gigi memuat Infinite Feed saat di-scroll
-            val nextOffset = (page - 1) * 12
-            val reqBody = mapOf(
-                "tab_id" to tabId.toIntOrNull(),
-                "tab_key" to tabString,
-                "module_id" to tabId.toIntOrNull(),
-                "module_key" to tabId,
-                "next" to "offset=$nextOffset&page_size=12"
-            ).toJson().toRequestBody("application/json".toMediaTypeOrNull())
-            
-            val res = app.post("$nativeApiUrl/homepage/v2/tab/feed", headers = getNativeHeaders(isVip = false), requestBody = reqBody).text
-            try {
-                val parsedData = tryParseJson<Map<String, Any>>(res)
-                val dataObj = parsedData?.get("data") as? Map<*, *>
-                
-                val pageInfo = dataObj?.get("page_info") as? Map<*, *>
-                hasMore = pageInfo?.get("has_more") as? Boolean ?: false
-                
-                (dataObj?.get("items") as? List<*>)?.filterIsInstance<Map<*, *>>()?.let { rawItems.addAll(it) }
-                (dataObj?.get("list") as? List<*>)?.filterIsInstance<Map<*, *>>()?.let { rawItems.addAll(it) }
-            } catch (e: Exception) {}
+            "$nativeApiUrl/homepage/v2/tab/index?tab_key=$tabKey&offset=$offset&position_index=$posIndex&rec_trigger=0"
         }
         
-        val items = rawItems.mapNotNull { item -> 
-            val title = (item["title"] as? String) ?: (item["name"] as? String) ?: return@mapNotNull null
-            val idStr = item["id"]?.toString() ?: item["key"]?.toString() ?: item["series_id"]?.toString() ?: return@mapNotNull null
+        val res = app.get(url, headers = getNativeHeaders(isVip = false)).text 
+        
+        val searchItems = mutableListOf<UniversalItem>()
+        var hasMore = false
+
+        try {
+            val dataObj = tryParseJson<UniversalFeedResponse>(res)?.data
+            hasMore = dataObj?.pageInfo?.hasMore ?: false
+
+            // Fungsi Mesin Penyedot Rekursif (Menyedot sampai ke akar-akarnya)
+            fun extractItems(itemsList: List<UniversalItem>?) {
+                itemsList?.forEach { item ->
+                    // Jika item punya judul, berarti ini film
+                    if (!item.title.isNullOrBlank() || !item.name.isNullOrBlank()) {
+                        searchItems.add(item)
+                    }
+                    // Jika item punya list di dalamnya, berarti ini kotak, gali lagi!
+                    extractItems(item.items)
+                    extractItems(item.list)
+                }
+            }
+            
+            dataObj?.let {
+                extractItems(it.items)
+                extractItems(it.list)
+                extractItems(it.components)
+                extractItems(it.modules)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        
+        val items = searchItems.mapNotNull { item -> 
+            val title = item.title ?: item.name ?: return@mapNotNull null
+            val idStr = item.id?.toString() ?: item.key ?: item.seriesId?.toString() ?: return@mapNotNull null
             
             if (title.equals("Ranking", ignoreCase = true) || title.equals("Peringkat", ignoreCase = true) || title.equals("Top", ignoreCase = true)) {
                 return@mapNotNull null
             }
             
-            val epInfo = item["episode_info"] as? Map<*, *>
-            val audioList = epInfo?.get("audio") as? List<*>
-            val hasIndoAudio = audioList?.any { it?.toString()?.contains("id-ID") == true } == true
+            val hasIndoAudio = item.episodeInfo?.audio?.contains("id-ID") == true
             val isDubbed = hasIndoAudio || title.contains("Dubbed", true) || title.contains("Sulih Suara", true)
             
-            val cover = (item["cover"] as? String) ?: (item["vertical_cover"] as? String)
+            val cover = item.cover ?: item.verticalCover
 
             newAnimeSearchResponse(title, idStr, TvType.AsianDrama) { 
                 this.posterUrl = fixUrlNull(cover)
             }.apply { 
                 if (isDubbed) addDubStatus(DubStatus.Dubbed) 
             }
-        }
+        }.distinctBy { it.url } // Mencegah film double masuk layar
 
         return newHomePageResponse(request.name, items, hasNext = hasMore)
     }
@@ -170,16 +156,27 @@ class FreeReels : MainAPI() {
         val reqBody = mapOf("keyword" to query, "next" to nextToken).toJson().toRequestBody("application/json".toMediaTypeOrNull())
         val res = app.post("$nativeApiUrl/search/drama", headers = getNativeHeaders(isVip = false), requestBody = reqBody).text
         
-        val searchItems = mutableListOf<NativeItem>()
+        val searchItems = mutableListOf<UniversalItem>()
         var hasMore = false
         
         try {
-            // MENGEMBALIKAN FUNGSI PENCARIAN ELEGAN (Seperti sebelum dirombak)
-            val dataObj = tryParseJson<NativeFeedResponse>(res)?.data
+            // Pencarian kembali menggunakan struktur yang stabil dan rapi
+            val dataObj = tryParseJson<UniversalFeedResponse>(res)?.data
             if (dataObj != null) {
                 hasMore = dataObj.pageInfo?.hasMore ?: false
-                dataObj.items?.let { searchItems.addAll(it) }
-                dataObj.list?.let { searchItems.addAll(it) }
+                
+                fun extractItems(itemsList: List<UniversalItem>?) {
+                    itemsList?.forEach { item ->
+                        if (!item.title.isNullOrBlank() || !item.name.isNullOrBlank()) {
+                            searchItems.add(item)
+                        }
+                        extractItems(item.items)
+                        extractItems(item.list)
+                    }
+                }
+                
+                extractItems(dataObj.items)
+                extractItems(dataObj.list)
             }
         } catch (e: Exception) {}
         
@@ -195,7 +192,8 @@ class FreeReels : MainAPI() {
             }.apply { 
                 if (isDubbed) addDubStatus(DubStatus.Dubbed) 
             }
-        }
+        }.distinctBy { it.url }
+        
         return newSearchResponseList(list, hasNext = hasMore)
     }
 
@@ -213,7 +211,7 @@ class FreeReels : MainAPI() {
         
         if (info == null || info.episodeList.isNullOrEmpty()) {
             res = app.get("$nativeApiUrl/drama/info?series_id=$seriesId", headers = getNativeHeaders(isVip = true)).text
-            info = tryParseJson<NativeDetailResponse>(res)?.data?.info ?: throw ErrorLoadingException("Film tidak ditemukan")
+            info = tryParseJson<NativeDetailResponse>(res)?.data?.info ?: throw ErrorLoadingException("Film tidak ditemukan / Belum rilis")
         }
 
         val episodeList = info.episodeList?.mapNotNull { ep -> 
@@ -264,16 +262,17 @@ class FreeReels : MainAPI() {
 data class NativeAuthResponse(@JsonProperty("data") val data: AuthData?)
 data class AuthData(@JsonProperty("auth_key") val authKey: String?, @JsonProperty("auth_secret") val authSecret: String?, @JsonProperty("token") val token: String?)
 
-data class NativeFeedResponse(@JsonProperty("data") val data: NativeFeedData?)
-data class NativeFeedData(
-    @JsonProperty("items") val items: List<NativeItem>?,
-    @JsonProperty("list") val list: List<NativeItem>?,
+data class UniversalFeedResponse(@JsonProperty("data") val data: UniversalFeedData?)
+data class UniversalFeedData(
+    @JsonProperty("items") val items: List<UniversalItem>?,
+    @JsonProperty("list") val list: List<UniversalItem>?,
+    @JsonProperty("components") val components: List<UniversalItem>?,
+    @JsonProperty("modules") val modules: List<UniversalItem>?,
     @JsonProperty("page_info") val pageInfo: PageInfo?
 )
 
-data class PageInfo(@JsonProperty("has_more") val hasMore: Boolean?)
-
-data class NativeItem(
+// Inception Class: Mampu membaca dirinya sendiri tanpa henti (Anti-Crash!)
+data class UniversalItem(
     @JsonProperty("id") val id: Any?, 
     @JsonProperty("key") val key: String?, 
     @JsonProperty("series_id") val seriesId: Any?, 
@@ -281,8 +280,12 @@ data class NativeItem(
     @JsonProperty("name") val name: String?, 
     @JsonProperty("cover") val cover: String?,
     @JsonProperty("vertical_cover") val verticalCover: String?,
-    @JsonProperty("episode_info") val episodeInfo: NativeEpisodeInfo?
+    @JsonProperty("episode_info") val episodeInfo: NativeEpisodeInfo?,
+    @JsonProperty("items") val items: List<UniversalItem>?,
+    @JsonProperty("list") val list: List<UniversalItem>?
 )
+
+data class PageInfo(@JsonProperty("has_more") val hasMore: Boolean?)
 
 data class NativeEpisodeInfo(
     @JsonProperty("audio") val audio: List<String>?,
