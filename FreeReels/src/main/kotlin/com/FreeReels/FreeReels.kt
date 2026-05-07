@@ -87,7 +87,6 @@ class FreeReels : MainAPI() {
         val searchItems = mutableListOf<NativeItem>()
         var hasMore = false
 
-        // Membagi Rute: Khusus "Segera Hadir" vs Kategori Normal
         val res = if (isComingSoon) {
             val nextToken = if (page == 1) "" else "offset=${(page - 1) * 20}&page_size=20"
             val url = "$nativeApiUrl/coming-soon/list?next=$nextToken"
@@ -107,7 +106,6 @@ class FreeReels : MainAPI() {
                 hasMore = pageInfo?.get("has_more") as? Boolean ?: false
             }
 
-            // ALGORITMA PENYEDOT 1: Mencari di dalam "components" atau "modules" (Untuk kategori normal)
             val components = (dataObj?.get("components") as? List<*>) ?: (dataObj?.get("modules") as? List<*>)
             if (components != null) {
                 for (comp in components) {
@@ -121,7 +119,6 @@ class FreeReels : MainAPI() {
                 }
             }
             
-            // ALGORITMA PENYEDOT 2: Mencari array langsung di root data (Untuk Segera Hadir / Fallback)
             if (searchItems.isEmpty() && dataObj != null) {
                 val directList = (dataObj["items"] as? List<*>) ?: (dataObj["list"] as? List<*>)
                 if (directList != null) {
@@ -147,14 +144,12 @@ class FreeReels : MainAPI() {
             val title = item.title ?: item.name ?: return@mapNotNull null
             val id = item.id ?: item.key ?: item.seriesId ?: return@mapNotNull null
             
-            // Membuang banner promosi
             if (title.equals("Ranking", ignoreCase = true) || title.equals("Peringkat", ignoreCase = true) || title.equals("Top", ignoreCase = true)) {
                 return@mapNotNull null
             }
             
             val targetUrl = if (isComingSoon) "coming_soon|$id" else id
             
-            // LOGIKA DUBBING: Membaca secara akurat dari properti audio Native
             val hasIndoAudio = item.episodeInfo?.audio?.contains("id-ID") == true
             val isDubbed = hasIndoAudio || title.contains("Dubbed", true) || title.contains("Sulih Suara", true)
             
@@ -236,7 +231,6 @@ class FreeReels : MainAPI() {
         }
 
         val episodeList = info.episodeList?.mapNotNull { ep -> 
-            // Jika isComingSoon, sembunyikan episode (membuat tombol Play buram/upcoming) KECUALI jika ada video teaser yang bisa diputar
             val hasVideo = !ep.externalAudioH264.isNullOrBlank() || !ep.m3u8Url.isNullOrBlank() || !ep.videoUrl.isNullOrBlank()
             if (isComingSoon && !hasVideo) return@mapNotNull null
 
@@ -246,12 +240,11 @@ class FreeReels : MainAPI() {
             } 
         } ?: emptyList()
 
-        val displayStatus = if (episodeList.isEmpty()) ShowStatus.Upcoming else ShowStatus.Ongoing
-
         return newTvSeriesLoadResponse(info.name ?: "Drama", url, TvType.AsianDrama, episodeList) {
             this.posterUrl = fixUrlNull(info.cover ?: info.verticalCover)
             this.plot = info.desc
-            this.showStatus = displayStatus
+            // Ini yang bikin tombol play buram saat tidak ada episode
+            this.comingSoon = isComingSoon || episodeList.isEmpty() 
         }
     }
 
