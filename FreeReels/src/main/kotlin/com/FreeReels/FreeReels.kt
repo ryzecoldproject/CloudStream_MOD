@@ -5,6 +5,8 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.security.MessageDigest
@@ -12,7 +14,6 @@ import java.security.SecureRandom
 
 class FreeReels : MainAPI() {
     override var mainUrl = "https://m.mydramawave.com"
-    // DOMAIN & PREFIX RAHASIA APLIKASI ANDROID (Full Bypass)
     private val nativeApiUrl = "https://apiv2.free-reels.com/frv2-api"
     
     override var name = "FreeReels"
@@ -28,8 +29,9 @@ class FreeReels : MainAPI() {
     
     private var sessionToken: String? = null
     private var sessionSecret: String? = null
+    private val sessionLock = Mutex()
 
-    // ID Kategori 100% Akurat dari API Native
+    // ID Kategori 100% Akurat sesuai Aplikasi Asli
     override val mainPage = mainPageOf(
         "503" to "Populer",
         "505" to "New",
@@ -44,7 +46,6 @@ class FreeReels : MainAPI() {
         return md.digest(input.toByteArray()).joinToString("") { "%02x".format(it) }
     }
 
-    // Header khusus menipu server seolah-olah kita adalah Aplikasi Android Asli
     private fun getNativeHeaders(): MutableMap<String, String> {
         val ts = System.currentTimeMillis()
         val signature = md5(authSalt + (sessionSecret ?: ""))
@@ -56,101 +57,133 @@ class FreeReels : MainAPI() {
             "content-type" to "application/json",
             "device" to "android",
             "device-id" to deviceId,
-            "language" to "id-ID", // Jimat untuk Poster & Judul Bahasa Indonesia
+            "language" to "id-ID",
             "user-agent" to "okhttp/4.9.2",
-            "internal-user-code" to "666666" // Jimat Penembus VIP Tanpa Koin
+            "internal-user-code" to "666666" // Jimat VIP
         )
     }
 
     private suspend fun ensureSession() {
         if (sessionToken != null) return
-        // Login menggunakan Native API (Plain JSON, Tanpa Enkripsi!)
-        val reqBody = mapOf("device_id" to deviceId).toJson().toRequestBody("application/json".toMediaTypeOrNull())
-        val res = app.post("$nativeApiUrl/anonymous/login", headers = getNativeHeaders(), requestBody = reqBody).text
-        val authData = tryParseJson<NativeAuthResponse>(res)
-        sessionToken = authData?.data?.authKey ?: authData?.data?.token
-        sessionSecret = authData?.data?.authSecret ?: ""
+        sessionLock.withLock {
+            if (sessionToken != null) return@withLock 
+            
+            val reqBody = mapOf("device_id" to deviceId).toJson().toRequestBody("application/json".toMediaTypeOrNull())
+            val res = app.post("$nativeApiUrl/anonymous/login", headers = getNativeHeaders(), requestBody = reqBody).text
+            val authData = tryParseJson<NativeAuthResponse>(res)
+            sessionToken = authData?.data?.authKey ?: authData?.data?.token
+            sessionSecret = authData?.data?.authSecret ?: ""
+        }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         ensureSession()
-        val reqBody = mapOf("module_key" to request.data, "next" to (if (page == 1) "" else page.toString())).toJson().toRequestBody("application/json".toMediaTypeOrNull())
-        val res = app.post("$nativeApiUrl/homepage/v2/tab/feed", headers = getNativeHeaders(), requestBody = reqBody).text
+        val isComingSoon = request.data == "622"
+        val nextToken = if (page == 1) "" else "offset=${(page - 1) * 20}&page_size=20"
         
+        val reqBody = mapOf(
+            "module_key" to request.data,
+            "tab_key" to request.data,
+            "tab_id" to request.data,
+            "next" to nextToken
+        ).toJson().toRequestBody("application/json".toMediaTypeOrNull())
+        
+        val res = app.post("$nativeApiUrl/homepage/v2/tab/feed", headers = getNativeHeaders(), requestBody = reqBody).text
         val data = tryParseJson<NativeFeedResponse>(res)
-        val items = data?.data?.items?.mapNotNull { item -> 
+        val searchItems = data?.data?.items ?: data?.data?.list ?: emptyList()
+        
+        val items = searchItems.mapNotNull { item -> 
             val title = item.title ?: item.name ?: return@mapNotNull null
+            val id = item.id ?: item.key ?: item.seriesId
             
-            // Filter cerdas: Buang poster "Ranking/Peringkat" yang tidak bisa diputar
-            if (title.equals("Ranking", ignoreCase = true) || title.equals("Peringkat", ignoreCase = true) || item.key.isNullOrBlank()) {
+            if (title.equals("Ranking", ignoreCase = true) || title.equals("Peringkat", ignoreCase = true) || id.isNullOrBlank()) {
                 return@mapNotNull null
             }
             
-            val isDubbed = title.contains("Dubbed", true) || title.contains("Dubbing", true) || title.contains("Sulih Suara", true)
+            val targetUrl = if (isComingSoon) "coming_soon|$id" else id
             
-            newAnimeSearchResponse(title, item.key, TvType.AsianDrama) { 
-                this.posterUrl = item.cover 
+            // LOGIKA DUBBING SUPER AKURAT (Berdasarkan Audio Array JSON Asli)
+            val hasIndoAudio = item.audio?.contains("id-ID") == true
+            val hasMultipleAudio = (item.audio?.size ?: 0) > 1
+            val isDubbed = hasIndoAudio || hasMultipleAudio || title.contains("Dubbed", true) || title.contains("Sulih Suara", true)
+            
+            newAnimeSearchResponse(title, targetUrl, TvType.AsianDrama) { 
+                this.posterUrl = fixUrlNull(item.cover ?: item.verticalCover)
             }.apply { 
                 if (isDubbed) addDubStatus(DubStatus.Dubbed) 
             }
-        } ?: emptyList()
+        }
 
         return newHomePageResponse(request.name, items, hasNext = data?.data?.pageInfo?.hasMore ?: false)
     }
 
-    override suspend fun search(query: String): List<SearchResponse> {
+    override suspend fun search(query: String, page: Int): SearchResponseList? {
         ensureSession()
-        val reqBody = mapOf("keyword" to query).toJson().toRequestBody("application/json".toMediaTypeOrNull())
+        val nextToken = if (page == 1) "" else "offset=${(page - 1) * 20}&page_size=20"
+        val reqBody = mapOf("keyword" to query, "next" to nextToken).toJson().toRequestBody("application/json".toMediaTypeOrNull())
         val res = app.post("$nativeApiUrl/search/drama", headers = getNativeHeaders(), requestBody = reqBody).text
         val data = tryParseJson<NativeSearchResponse>(res)
         
         val searchItems = data?.data?.items ?: data?.data?.list ?: emptyList()
+        val hasMore = data?.data?.pageInfo?.hasMore ?: false
         
-        return searchItems.mapNotNull { item ->
+        val list = searchItems.mapNotNull { item ->
             val title = item.name ?: item.title ?: return@mapNotNull null
-            val isDubbed = title.contains("Dubbed", true) || title.contains("Dubbing", true) || title.contains("Sulih Suara", true)
+            val id = item.id ?: item.key ?: item.seriesId ?: return@mapNotNull null
             
-            // Native search menggunakan "id", bukan "series_id"
-            newAnimeSearchResponse(title, item.id ?: item.key ?: return@mapNotNull null, TvType.AsianDrama) { 
-                this.posterUrl = item.cover 
+            // LOGIKA DUBBING SUPER AKURAT
+            val hasIndoAudio = item.audio?.contains("id-ID") == true
+            val hasMultipleAudio = (item.audio?.size ?: 0) > 1
+            val isDubbed = hasIndoAudio || hasMultipleAudio || title.contains("Dubbed", true) || title.contains("Sulih Suara", true)
+            
+            newAnimeSearchResponse(title, id, TvType.AsianDrama) { 
+                this.posterUrl = fixUrlNull(item.cover ?: item.verticalCover)
             }.apply { 
                 if (isDubbed) addDubStatus(DubStatus.Dubbed) 
             }
         }
+        return newSearchResponseList(list, hasNext = hasMore)
+    }
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        return search(query, 1)?.items ?: emptyList()
     }
 
     override suspend fun load(url: String): LoadResponse {
         ensureSession()
-        val seriesId = url.split("/").last()
         
-        // Coba rute info_v2 terlebih dahulu (Rute Utama Native)
+        val isComingSoon = url.startsWith("coming_soon|")
+        val seriesId = url.substringAfter("coming_soon|").split("/").last()
+        
         var res = app.get("$nativeApiUrl/drama/info_v2?series_id=$seriesId", headers = getNativeHeaders()).text
         var info = tryParseJson<NativeDetailResponse>(res)?.data?.info
         
-        // Fallback cerdas: Jika info_v2 kosong, pakai rute info biasa
         if (info == null || info.episodeList.isNullOrEmpty()) {
             res = app.get("$nativeApiUrl/drama/info?series_id=$seriesId", headers = getNativeHeaders()).text
-            info = tryParseJson<NativeDetailResponse>(res)?.data?.info ?: throw ErrorLoadingException("Film tidak ditemukan / Geo-blocked")
+            info = tryParseJson<NativeDetailResponse>(res)?.data?.info ?: throw ErrorLoadingException("Film tidak ditemukan / Belum rilis")
         }
 
-        val episodeList = info.episodeList?.map { ep -> 
-            val epData = ep.toJson()
-            newEpisode(epData) {
-                this.name = ep.name ?: "Episode ${ep.index}"
-                this.episode = ep.index
-            } 
-        } ?: emptyList()
+        val episodeList = if (isComingSoon) {
+            emptyList()
+        } else {
+            info.episodeList?.map { ep -> 
+                newEpisode(ep.toJson()) {
+                    this.name = ep.name ?: "Episode ${ep.index}"
+                    this.episode = ep.index
+                } 
+            } ?: emptyList()
+        }
 
         return newTvSeriesLoadResponse(info.name ?: "Drama", url, TvType.AsianDrama, episodeList) {
-            this.posterUrl = info.cover
+            this.posterUrl = fixUrlNull(info.cover ?: info.verticalCover)
             this.plot = info.desc
+            this.comingSoon = isComingSoon || episodeList.isEmpty() 
         }
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val ep = tryParseJson<NativeEpisode>(data) ?: return false
         
-        // Di API Native, link VIP sudah langsung tersedia di sini secara telanjang bulat!
         val videoUrl = ep.externalAudioH264 ?: ep.externalAudioH265 ?: ep.m3u8Url ?: ep.videoUrl
         
         if (!videoUrl.isNullOrBlank()) {
@@ -165,32 +198,29 @@ class FreeReels : MainAPI() {
             })
         }
 
-        val subs = ep.subtitleList ?: emptyList()
-        for (sub in subs) {
+        ep.subtitleList?.forEach { sub ->
             val subUrl = sub.vtt ?: sub.subtitle
             if (!subUrl.isNullOrBlank()) {
-                val fixSubUrl = if (subUrl.startsWith("http")) subUrl else "https://static-v1.mydramawave.com$subUrl"
                 subtitleCallback.invoke(
-                    newSubtitleFile(sub.language ?: "id", fixSubUrl)
+                    newSubtitleFile(sub.language ?: "id", fixUrl(subUrl))
                 )
             }
         }
-        
         return true
     }
 }
 
 // ==========================================
-// DATA MODELS (PURE NATIVE - TIDAK PERLU DECRYPT/ENCRYPT)
+// DATA MODELS PURE NATIVE
 // ==========================================
 data class NativeAuthResponse(@JsonProperty("data") val data: AuthData?)
 data class AuthData(@JsonProperty("auth_key") val authKey: String?, @JsonProperty("auth_secret") val authSecret: String?, @JsonProperty("token") val token: String?)
 
 data class NativeSearchResponse(@JsonProperty("data") val data: SearchResultList?)
-data class SearchResultList(@JsonProperty("list") val list: List<NativeItem>?, @JsonProperty("items") val items: List<NativeItem>?)
+data class SearchResultList(@JsonProperty("list") val list: List<NativeItem>?, @JsonProperty("items") val items: List<NativeItem>?, @JsonProperty("page_info") val pageInfo: PageInfo?)
 
 data class NativeFeedResponse(@JsonProperty("data") val data: FeedData?)
-data class FeedData(@JsonProperty("items") val items: List<NativeItem>?, @JsonProperty("page_info") val pageInfo: PageInfo?)
+data class FeedData(@JsonProperty("items") val items: List<NativeItem>?, @JsonProperty("list") val list: List<NativeItem>?, @JsonProperty("page_info") val pageInfo: PageInfo?)
 data class PageInfo(@JsonProperty("has_more") val hasMore: Boolean?)
 
 data class NativeItem(
@@ -199,7 +229,11 @@ data class NativeItem(
     @JsonProperty("series_id") val seriesId: String?, 
     @JsonProperty("title") val title: String?, 
     @JsonProperty("name") val name: String?, 
-    @JsonProperty("cover") val cover: String?
+    @JsonProperty("cover") val cover: String?,
+    @JsonProperty("vertical_cover") val verticalCover: String?,
+    // INI DIA KUNCI RAHASIA UNTUK LABEL DUBBING YANG KITA TEMUKAN!
+    @JsonProperty("audio") val audio: List<String>?,
+    @JsonProperty("original_audio_language") val originalAudioLanguage: String?
 )
 
 data class NativeDetailResponse(@JsonProperty("data") val data: DramaInfoData?)
@@ -207,6 +241,7 @@ data class DramaInfoData(@JsonProperty("info") val info: DramaInfo?)
 data class DramaInfo(
     @JsonProperty("name") val name: String?, 
     @JsonProperty("cover") val cover: String?, 
+    @JsonProperty("vertical_cover") val verticalCover: String?,
     @JsonProperty("desc") val desc: String?, 
     @JsonProperty("episode_list") val episodeList: List<NativeEpisode>?
 )
