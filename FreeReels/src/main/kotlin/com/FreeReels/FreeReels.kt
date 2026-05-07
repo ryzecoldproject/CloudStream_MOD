@@ -31,7 +31,7 @@ class FreeReels : MainAPI() {
     private var sessionSecret: String? = null
     private val sessionLock = Mutex()
 
-    // Menggunakan Parameter Akurat dari MT Manager (tab_key dan position_index)
+    // 100% Akurat Menggunakan Rute Asli Server
     override val mainPage = mainPageOf(
         "503_10000" to "Populer",
         "505_10001" to "New",
@@ -59,7 +59,7 @@ class FreeReels : MainAPI() {
             "device-id" to deviceId,
             "language" to "id-ID",
             "user-agent" to "okhttp/4.9.2",
-            "internal-user-code" to "666666" // Jimat Dewa Anti-VIP
+            "internal-user-code" to "666666" // Jimat Bypass VIP
         )
     }
 
@@ -78,61 +78,85 @@ class FreeReels : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         ensureSession()
-        // API tab/index tidak memerlukan pagination, jadi kita block page > 1 agar tidak error scroll
-        if (page > 1) return newHomePageResponse(request.name, emptyList(), hasNext = false)
-
+        
         val keys = request.data.split("_")
         val tabKey = keys[0]
         val posIndex = keys.getOrNull(1) ?: "10000"
-        val isComingSoon = tabKey == "622"
-
-        // Menggunakan rute 100% akurat dari MT Manager
-        val url = "$nativeApiUrl/homepage/v2/tab/index?tab_key=$tabKey&position_index=$posIndex&rec_trigger=0"
-        val res = app.get(url, headers = getNativeHeaders()).text
-
-        // ALGORITMA BULLETPROOF: Mencari array film di manapun server menyembunyikannya!
+        
         val searchItems = mutableListOf<NativeItem>()
-        try {
-            val parsedData = tryParseJson<Map<String, Any>>(res)
-            val dataObj = parsedData?.get("data") as? Map<*, *>
-            if (dataObj != null) {
-                for ((_, value) in dataObj) {
-                    if (value is List<*>) {
-                        val listStr = value.toJson()
-                        val parsedList = tryParseJson<List<NativeItem>>(listStr) ?: emptyList()
-                        if (parsedList.isNotEmpty() && (parsedList[0].key != null || parsedList[0].id != null)) {
+        var hasMore = false
+
+        // LOGIKA KHUSUS "SEGERA HADIR" (Mendukung Scroll & Fitur Penuh)
+        if (tabKey == "622") {
+            val nextToken = if (page == 1) "" else "offset=${(page - 1) * 20}&page_size=20"
+            val url = "$nativeApiUrl/coming-soon/list?next=$nextToken"
+            val res = app.get(url, headers = getNativeHeaders()).text
+            val data = tryParseJson<NativeSearchResponse>(res)
+            
+            val items = data?.data?.items ?: data?.data?.list ?: emptyList()
+            searchItems.addAll(items)
+            hasMore = data?.data?.pageInfo?.hasMore ?: false
+            
+        } else {
+            // LOGIKA KATEGORI NORMAL (Statis dari tab/index, tidak di-scroll)
+            if (page > 1) return newHomePageResponse(request.name, emptyList(), hasNext = false)
+            
+            val url = "$nativeApiUrl/homepage/v2/tab/index?tab_key=$tabKey&position_index=$posIndex&rec_trigger=0"
+            val res = app.get(url, headers = getNativeHeaders()).text
+            
+            try {
+                val parsedData = tryParseJson<Map<String, Any>>(res)
+                val dataObj = parsedData?.get("data") as? Map<*, *>
+                
+                // Mesin Penyedot Komponen/Modul (Menghindari array kosong)
+                val components = (dataObj?.get("components") as? List<*>) ?: 
+                                 (dataObj?.get("modules") as? List<*>) ?: 
+                                 (dataObj?.get("list") as? List<*>)
+                
+                if (components != null) {
+                    for (comp in components) {
+                        if (comp is Map<*, *>) {
+                            val itemsList = (comp["items"] as? List<*>) ?: (comp["list"] as? List<*>)
+                            if (itemsList != null) {
+                                val parsedList = tryParseJson<List<NativeItem>>(itemsList.toJson()) ?: emptyList()
+                                searchItems.addAll(parsedList)
+                            }
+                        }
+                    }
+                } else if (dataObj != null) {
+                    for ((_, value) in dataObj) {
+                        if (value is List<*>) {
+                            val parsedList = tryParseJson<List<NativeItem>>(value.toJson()) ?: emptyList()
                             searchItems.addAll(parsedList)
-                            break
                         }
                     }
                 }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+            hasMore = false
         }
         
         val items = searchItems.mapNotNull { item -> 
             val title = item.title ?: item.name ?: return@mapNotNull null
             val id = item.id ?: item.key ?: item.seriesId ?: return@mapNotNull null
             
-            if (title.equals("Ranking", ignoreCase = true) || title.equals("Peringkat", ignoreCase = true)) {
+            // Membuang banner promosi
+            if (title.equals("Ranking", ignoreCase = true) || title.equals("Peringkat", ignoreCase = true) || title.equals("Top", ignoreCase = true)) {
                 return@mapNotNull null
             }
             
-            val targetUrl = if (isComingSoon) "coming_soon|$id" else id
-            
-            // LOGIKA DUBBING: Membaca secara akurat dari properti audio Native (Termux)
             val hasIndoAudio = item.episodeInfo?.audio?.contains("id-ID") == true
             val isDubbed = hasIndoAudio || title.contains("Dubbed", true) || title.contains("Sulih Suara", true)
             
-            newAnimeSearchResponse(title, targetUrl, TvType.AsianDrama) { 
+            newAnimeSearchResponse(title, id, TvType.AsianDrama) { 
                 this.posterUrl = fixUrlNull(item.cover ?: item.verticalCover)
             }.apply { 
                 if (isDubbed) addDubStatus(DubStatus.Dubbed) 
             }
         }
 
-        return newHomePageResponse(request.name, items, hasNext = false)
+        return newHomePageResponse(request.name, items, hasNext = hasMore)
     }
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
@@ -141,26 +165,9 @@ class FreeReels : MainAPI() {
         val reqBody = mapOf("keyword" to query, "next" to nextToken).toJson().toRequestBody("application/json".toMediaTypeOrNull())
         val res = app.post("$nativeApiUrl/search/drama", headers = getNativeHeaders(), requestBody = reqBody).text
         
-        val searchItems = mutableListOf<NativeItem>()
-        var hasMore = false
-        try {
-            val parsedData = tryParseJson<Map<String, Any>>(res)
-            val dataObj = parsedData?.get("data") as? Map<*, *>
-            if (dataObj != null) {
-                val pageInfo = dataObj["page_info"] as? Map<*, *>
-                hasMore = pageInfo?.get("has_more") as? Boolean ?: false
-                
-                for ((_, value) in dataObj) {
-                    if (value is List<*>) {
-                        val parsedList = tryParseJson<List<NativeItem>>(value.toJson()) ?: emptyList()
-                        if (parsedList.isNotEmpty() && (parsedList[0].key != null || parsedList[0].id != null)) {
-                            searchItems.addAll(parsedList)
-                            break
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {}
+        val data = tryParseJson<NativeSearchResponse>(res)
+        val searchItems = data?.data?.items ?: data?.data?.list ?: emptyList()
+        val hasMore = data?.data?.pageInfo?.hasMore ?: false
         
         val list = searchItems.mapNotNull { item ->
             val title = item.name ?: item.title ?: return@mapNotNull null
@@ -185,32 +192,30 @@ class FreeReels : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         ensureSession()
         
-        val isComingSoon = url.startsWith("coming_soon|")
-        val seriesId = url.substringAfter("coming_soon|").split("/").last()
+        val seriesId = url.split("/").last()
         
         var res = app.get("$nativeApiUrl/drama/info_v2?series_id=$seriesId", headers = getNativeHeaders()).text
         var info = tryParseJson<NativeDetailResponse>(res)?.data?.info
         
         if (info == null || info.episodeList.isNullOrEmpty()) {
             res = app.get("$nativeApiUrl/drama/info?series_id=$seriesId", headers = getNativeHeaders()).text
-            info = tryParseJson<NativeDetailResponse>(res)?.data?.info ?: throw ErrorLoadingException("Film tidak ditemukan / Belum rilis")
+            info = tryParseJson<NativeDetailResponse>(res)?.data?.info ?: throw ErrorLoadingException("Film tidak ditemukan")
         }
 
-        val episodeList = if (isComingSoon) {
-            emptyList()
-        } else {
-            info.episodeList?.map { ep -> 
-                newEpisode(ep.toJson()) {
-                    this.name = ep.name ?: "Episode ${ep.index}"
-                    this.episode = ep.index
-                } 
-            } ?: emptyList()
-        }
+        val episodeList = info.episodeList?.map { ep -> 
+            newEpisode(ep.toJson()) {
+                this.name = ep.name ?: "Episode ${ep.index}"
+                this.episode = ep.index
+            } 
+        } ?: emptyList()
+
+        // UI Cerdas: Kalau episodenya nol, CloudStream akan menandainya sebagai UPCOMING (Segera Hadir)
+        val displayStatus = if (episodeList.isEmpty()) ShowStatus.Upcoming else ShowStatus.Ongoing
 
         return newTvSeriesLoadResponse(info.name ?: "Drama", url, TvType.AsianDrama, episodeList) {
             this.posterUrl = fixUrlNull(info.cover ?: info.verticalCover)
             this.plot = info.desc
-            this.comingSoon = isComingSoon || episodeList.isEmpty() 
+            this.showStatus = displayStatus
         }
     }
 
@@ -248,6 +253,11 @@ class FreeReels : MainAPI() {
 // ==========================================
 data class NativeAuthResponse(@JsonProperty("data") val data: AuthData?)
 data class AuthData(@JsonProperty("auth_key") val authKey: String?, @JsonProperty("auth_secret") val authSecret: String?, @JsonProperty("token") val token: String?)
+
+data class NativeSearchResponse(@JsonProperty("data") val data: SearchResultList?)
+data class SearchResultList(@JsonProperty("list") val list: List<NativeItem>?, @JsonProperty("items") val items: List<NativeItem>?, @JsonProperty("page_info") val pageInfo: PageInfo?)
+
+data class PageInfo(@JsonProperty("has_more") val hasMore: Boolean?)
 
 data class NativeItem(
     @JsonProperty("id") val id: String?, 
