@@ -31,7 +31,7 @@ class FreeReels : MainAPI() {
     private var sessionSecret: String? = null
     private val sessionLock = Mutex()
 
-    // 100% Akurat Menggunakan Rute Asli Server
+    // ID Kategori 100% Akurat Menggunakan Rute Asli Server
     override val mainPage = mainPageOf(
         "503_10000" to "Populer",
         "505_10001" to "New",
@@ -232,12 +232,11 @@ class FreeReels : MainAPI() {
             } 
         } ?: emptyList()
 
-        val displayStatus = if (episodeList.isEmpty()) ShowStatus.Upcoming else ShowStatus.Ongoing
-
         return newTvSeriesLoadResponse(info.name ?: "Drama", url, TvType.AsianDrama, episodeList) {
             this.posterUrl = fixUrlNull(info.cover ?: info.verticalCover)
             this.plot = info.desc
-            this.showStatus = displayStatus
+            // Ini akan membuat tombol menjadi "Segera Hadir" jika episode kosong, TANPA harus mengubah ShowStatus
+            this.comingSoon = isComingSoon || episodeList.isEmpty() 
         }
     }
 
