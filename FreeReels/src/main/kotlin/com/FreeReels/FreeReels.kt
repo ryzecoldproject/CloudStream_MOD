@@ -33,6 +33,9 @@ class FreeReels : MainAPI() {
     private var sessionToken: String? = null
     private var sessionSecret: String? = null
     private val sessionLock = Mutex()
+    
+    // CACHE PINTAR: Menyimpan Token Next asli dari server untuk Scroll yang sempurna!
+    private val nextTokenCache = mutableMapOf<String, String>()
 
     // FORMAT: TabID_PositionIndex_RecommendModuleKey
     override val mainPage = mainPageOf(
@@ -49,7 +52,6 @@ class FreeReels : MainAPI() {
         return md.digest(input.toByteArray()).joinToString("") { "%02x".format(it) }
     }
 
-    // HEADER ASLI VERSI 2.2.40 (Super Ketat Anti-Blokir)
     private fun getNativeHeaders(isVip: Boolean = false): MutableMap<String, String> {
         val ts = System.currentTimeMillis()
         val signature = md5(authSalt + (sessionSecret ?: ""))
@@ -81,14 +83,14 @@ class FreeReels : MainAPI() {
             "x-device-fingerprint" to "Redmi/sky_global/sky:14/UKQ1.231003.002/V816.0.11.0.UMWMIXM:user/release-keys",
             "session-id" to sessionId,
             "app-name" to "com.freereels.app",
-            "app-version" to "2.2.40",
+            "app-version" to "2.2.40", // Versi asli anti-blokir
             "device-id" to deviceId,
             "device-version" to "34",
             "device" to "android",
             "Authorization" to "oauth_signature=$signature,oauth_token=${sessionToken ?: "undefined"},ts=$ts"
         )
         
-        // Jimat VIP hanya dipasang saat mengambil video
+        // Jimat VIP hanya dipasang saat mengambil video agar Homepage tidak dikosongkan
         if (isVip) {
             headers["internal-user-code"] = "666666" 
         }
@@ -116,30 +118,22 @@ class FreeReels : MainAPI() {
         }
     }
 
-    // MESIN PENYEDOT JSON (Anti-Crash)
-    private fun extractMovies(dataObj: Map<*, *>?): List<Map<*, *>> {
-        if (dataObj == null) return emptyList()
-        val movies = mutableListOf<Map<*, *>>()
-
-        (dataObj["items"] as? List<*>)?.filterIsInstance<Map<*, *>>()?.let { movies.addAll(it) }
-        (dataObj["list"] as? List<*>)?.filterIsInstance<Map<*, *>>()?.let { movies.addAll(it) }
-
-        listOf("components", "modules").forEach { key ->
-            (dataObj[key] as? List<*>)?.filterIsInstance<Map<*, *>>()?.forEach { comp ->
-                (comp["items"] as? List<*>)?.filterIsInstance<Map<*, *>>()?.let { movies.addAll(it) }
-                (comp["list"] as? List<*>)?.filterIsInstance<Map<*, *>>()?.let { movies.addAll(it) }
+    // Mesin penyedot JSON anti-crash
+    private fun extractMovies(dataObj: UniversalFeedData?, dest: MutableList<UniversalItem>) {
+        if (dataObj == null) return
+        fun extract(itemsList: List<UniversalItem>?) {
+            itemsList?.forEach { item ->
+                if (!item.title.isNullOrBlank() || !item.name.isNullOrBlank()) {
+                    dest.add(item)
+                }
+                extract(item.items)
+                extract(item.list)
             }
         }
-
-        val uniqueMovies = mutableMapOf<String, Map<*, *>>()
-        movies.forEach { m ->
-            val title = (m["title"] as? String) ?: (m["name"] as? String)
-            val mId = m["id"]?.toString() ?: m["key"]?.toString() ?: m["series_id"]?.toString()
-            if (!title.isNullOrBlank() && !mId.isNullOrBlank() && !title.equals("Ranking", true) && !title.equals("Peringkat", true) && !title.equals("Top", true)) {
-                uniqueMovies[mId] = m
-            }
-        }
-        return uniqueMovies.values.toList()
+        extract(dataObj.items)
+        extract(dataObj.list)
+        extract(dataObj.components)
+        extract(dataObj.modules)
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -151,87 +145,111 @@ class FreeReels : MainAPI() {
         val recommendKey = keys.getOrNull(2) ?: tabId
         
         var hasMore = false
-        val rawItems = if (page == 1) {
-            // PAGE 1: Rute Beranda Normal
+        val searchItems = mutableListOf<UniversalItem>()
+        
+        if (page == 1) {
+            // PAGE 1: Tembak Beranda dan Simpan Kunci untuk Page 2
             val url = "$nativeApiUrl/homepage/v2/tab/index?tab_key=$tabId&position_index=$posIndex&first="
-            val res = app.get(url, headers = getNativeHeaders(isVip = false)).text
+            val res = app.get(url, headers = getNativeHeaders(isVip = false)).text 
+            val dataObj = tryParseJson<UniversalFeedResponse>(res)?.data
             
-            val parsedData = tryParseJson<Map<String, Any>>(res)
-            val dataObj = parsedData?.get("data") as? Map<*, *>
-            val pageInfo = dataObj?.get("page_info") as? Map<*, *>
+            val nextToken = dataObj?.pageInfo?.next
+            if (!nextToken.isNullOrBlank()) {
+                nextTokenCache["${tabId}_2"] = nextToken // Masukkan kunci asli server ke dompet
+            }
             
-            // Cek apakah ada halaman selanjutnya
-            hasMore = pageInfo?.get("has_more") as? Boolean ?: (pageInfo?.get("next") != null)
+            hasMore = dataObj?.pageInfo?.hasMore ?: !nextToken.isNullOrBlank()
+            extractMovies(dataObj, searchItems)
             
-            extractMovies(dataObj)
         } else {
-            // PAGE 2+: Oper Gigi Infinite Scroll
-            val offset = (page - 1) * 10
-            val reqBody = mapOf(
-                "module_key" to recommendKey,
-                "next" to "offset=$offset&position_index=$posIndex"
-            ).toJson().toRequestBody("application/json".toMediaTypeOrNull())
+            // PAGE 2, 3, dst: Keluarkan kunci asli dari dompet
+            var currentNext = nextTokenCache["${tabId}_${page}"]
             
-            val url = "$nativeApiUrl/homepage/v2/tab/feed"
-            val res = app.post(url, headers = getNativeHeaders(isVip = false), requestBody = reqBody).text
+            // Loop Jaga-Jaga (Sama persis seperti fetchFeedPage di kitab suci DEX)
+            if (currentNext.isNullOrBlank()) {
+                val url = "$nativeApiUrl/homepage/v2/tab/index?tab_key=$tabId&position_index=$posIndex&first="
+                val res = app.get(url, headers = getNativeHeaders(isVip = false)).text 
+                currentNext = tryParseJson<UniversalFeedResponse>(res)?.data?.pageInfo?.next
+                
+                for (i in 2 until page) {
+                    if (currentNext.isNullOrBlank()) break
+                    val reqBody = mapOf("module_key" to recommendKey, "next" to currentNext).toJson().toRequestBody("application/json".toMediaTypeOrNull())
+                    val loopRes = app.post("$nativeApiUrl/homepage/v2/tab/feed", headers = getNativeHeaders(isVip = false), requestBody = reqBody).text
+                    currentNext = tryParseJson<UniversalFeedResponse>(loopRes)?.data?.pageInfo?.next
+                }
+            }
             
-            val parsedData = tryParseJson<Map<String, Any>>(res)
-            val dataObj = parsedData?.get("data") as? Map<*, *>
-            val pageInfo = dataObj?.get("page_info") as? Map<*, *>
+            if (currentNext.isNullOrBlank()) {
+                return newHomePageResponse(request.name, emptyList(), hasNext = false)
+            }
             
-            hasMore = pageInfo?.get("has_more") as? Boolean ?: (pageInfo?.get("next") != null)
+            // Tembak Infinite Feed dengan kunci asli!
+            val reqBody = mapOf("module_key" to recommendKey, "next" to currentNext).toJson().toRequestBody("application/json".toMediaTypeOrNull())
+            val res = app.post("$nativeApiUrl/homepage/v2/tab/feed", headers = getNativeHeaders(isVip = false), requestBody = reqBody).text
+            val dataObj = tryParseJson<UniversalFeedResponse>(res)?.data
             
-            extractMovies(dataObj)
+            val nextNextToken = dataObj?.pageInfo?.next
+            if (!nextNextToken.isNullOrBlank()) {
+                nextTokenCache["${tabId}_${page + 1}"] = nextNextToken // Simpan kunci untuk halaman berikutnya
+            }
+            
+            hasMore = dataObj?.pageInfo?.hasMore ?: !nextNextToken.isNullOrBlank()
+            extractMovies(dataObj, searchItems)
         }
 
-        val items = rawItems.mapNotNull { item -> 
-            val title = (item["title"] as? String) ?: (item["name"] as? String) ?: return@mapNotNull null
-            val idStr = item["id"]?.toString() ?: item["key"]?.toString() ?: item["series_id"]?.toString() ?: return@mapNotNull null
-            val cover = (item["cover"] as? String) ?: (item["vertical_cover"] as? String)
+        val items = searchItems.mapNotNull { item -> 
+            val title = item.title ?: item.name ?: return@mapNotNull null
+            val idStr = item.id?.toString() ?: item.key ?: item.seriesId?.toString() ?: return@mapNotNull null
             
-            val epInfo = item["episode_info"] as? Map<*, *>
-            val audioList = epInfo?.get("audio") as? List<*>
-            val hasIndoAudio = audioList?.any { it?.toString()?.contains("id-ID") == true } == true
+            if (title.equals("Ranking", ignoreCase = true) || title.equals("Peringkat", ignoreCase = true) || title.equals("Top", ignoreCase = true)) {
+                return@mapNotNull null
+            }
+            
+            val hasIndoAudio = item.episodeInfo?.audio?.contains("id-ID") == true
             val isDubbed = hasIndoAudio || title.contains("Dubbed", true) || title.contains("Sulih Suara", true)
+            val cover = item.cover ?: item.verticalCover
 
             newAnimeSearchResponse(title, idStr, TvType.AsianDrama) { 
                 this.posterUrl = fixUrlNull(cover)
             }.apply { 
                 if (isDubbed) addDubStatus(DubStatus.Dubbed) 
             }
-        }
+        }.distinctBy { it.url } // Mencegah film duplikat masuk layar
 
         return newHomePageResponse(request.name, items, hasNext = hasMore)
     }
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
         ensureSession()
+        // Fitur Pencarian dikembalikan persis seperti yang kamu instruksikan karena sudah terbukti lancar
         val nextToken = if (page == 1) "" else "offset=${(page - 1) * 20}&page_size=20"
         val reqBody = mapOf("keyword" to query, "next" to nextToken).toJson().toRequestBody("application/json".toMediaTypeOrNull())
         val res = app.post("$nativeApiUrl/search/drama", headers = getNativeHeaders(isVip = false), requestBody = reqBody).text
         
-        val parsedData = tryParseJson<Map<String, Any>>(res)
-        val dataObj = parsedData?.get("data") as? Map<*, *>
-        val hasMore = (dataObj?.get("page_info") as? Map<*, *>)?.get("has_more") as? Boolean ?: false
+        val searchItems = mutableListOf<UniversalItem>()
+        var hasMore = false
         
-        val rawItems = extractMovies(dataObj)
+        try {
+            val dataObj = tryParseJson<UniversalFeedResponse>(res)?.data
+            if (dataObj != null) {
+                hasMore = dataObj.pageInfo?.hasMore ?: false
+                extractMovies(dataObj, searchItems)
+            }
+        } catch (e: Exception) {}
         
-        val list = rawItems.mapNotNull { item ->
-            val title = (item["title"] as? String) ?: (item["name"] as? String) ?: return@mapNotNull null
-            val idStr = item["id"]?.toString() ?: item["key"]?.toString() ?: item["series_id"]?.toString() ?: return@mapNotNull null
-            val cover = (item["cover"] as? String) ?: (item["vertical_cover"] as? String)
+        val list = searchItems.mapNotNull { item ->
+            val title = item.name ?: item.title ?: return@mapNotNull null
+            val idStr = item.id?.toString() ?: item.key ?: item.seriesId?.toString() ?: return@mapNotNull null
             
-            val epInfo = item["episode_info"] as? Map<*, *>
-            val audioList = epInfo?.get("audio") as? List<*>
-            val hasIndoAudio = audioList?.any { it?.toString()?.contains("id-ID") == true } == true
+            val hasIndoAudio = item.episodeInfo?.audio?.contains("id-ID") == true
             val isDubbed = hasIndoAudio || title.contains("Dubbed", true) || title.contains("Sulih Suara", true)
             
             newAnimeSearchResponse(title, idStr, TvType.AsianDrama) { 
-                this.posterUrl = fixUrlNull(cover)
+                this.posterUrl = fixUrlNull(item.cover ?: item.verticalCover)
             }.apply { 
                 if (isDubbed) addDubStatus(DubStatus.Dubbed) 
             }
-        }
+        }.distinctBy { it.url }
         
         return newSearchResponseList(list, hasNext = hasMore)
     }
@@ -245,7 +263,6 @@ class FreeReels : MainAPI() {
         
         val seriesId = url.split("/").last()
         
-        // MENGELUARKAN JIMAT VIP SAAT LOAD EPISODE AGAR BISA NONTON GRATIS!
         var res = app.get("$nativeApiUrl/drama/info_v2?series_id=$seriesId", headers = getNativeHeaders(isVip = true)).text
         var info = tryParseJson<NativeDetailResponse>(res)?.data?.info
         
@@ -298,10 +315,42 @@ class FreeReels : MainAPI() {
 
 // ==========================================
 // DATA MODELS PURE NATIVE 
-// (Hanya untuk Auth, Detail, dan Video)
 // ==========================================
 data class NativeAuthResponse(@JsonProperty("data") val data: AuthData?)
 data class AuthData(@JsonProperty("auth_key") val authKey: String?, @JsonProperty("auth_secret") val authSecret: String?, @JsonProperty("token") val token: String?)
+
+data class UniversalFeedResponse(@JsonProperty("data") val data: UniversalFeedData?)
+data class UniversalFeedData(
+    @JsonProperty("items") val items: List<UniversalItem>?,
+    @JsonProperty("list") val list: List<UniversalItem>?,
+    @JsonProperty("components") val components: List<UniversalItem>?,
+    @JsonProperty("modules") val modules: List<UniversalItem>?,
+    @JsonProperty("page_info") val pageInfo: PageInfo?
+)
+
+data class UniversalItem(
+    @JsonProperty("id") val id: Any?, 
+    @JsonProperty("key") val key: String?, 
+    @JsonProperty("series_id") val seriesId: Any?, 
+    @JsonProperty("title") val title: String?, 
+    @JsonProperty("name") val name: String?, 
+    @JsonProperty("cover") val cover: String?,
+    @JsonProperty("vertical_cover") val verticalCover: String?,
+    @JsonProperty("episode_info") val episodeInfo: NativeEpisodeInfo?,
+    @JsonProperty("items") val items: List<UniversalItem>?,
+    @JsonProperty("list") val list: List<UniversalItem>?
+)
+
+data class PageInfo(
+    @JsonProperty("has_more") val hasMore: Boolean?,
+    @JsonProperty("next") val next: String? // Menyimpan parameter asli server!
+)
+
+data class NativeEpisodeInfo(
+    @JsonProperty("audio") val audio: List<String>?,
+    @JsonProperty("original_audio_language") val originalAudioLanguage: String?,
+    @JsonProperty("new") val isNew: Boolean?
+)
 
 data class NativeDetailResponse(@JsonProperty("data") val data: DramaInfoData?)
 data class DramaInfoData(@JsonProperty("info") val info: DramaInfo?)
