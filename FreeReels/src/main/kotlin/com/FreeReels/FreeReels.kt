@@ -11,6 +11,10 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.security.MessageDigest
 import java.security.SecureRandom
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
+import android.util.Base64
 
 class FreeReels : MainAPI() {
     override var mainUrl = "https://m.mydramawave.com"
@@ -21,7 +25,7 @@ class FreeReels : MainAPI() {
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.AsianDrama)
+    override val supportedTypes = setOf(TvType.AsianDrama, TvType.Anime)
 
     private val secureRandom = SecureRandom()
     private val deviceId = (1..32).map { "0123456789abcdef"[secureRandom.nextInt(16)] }.joinToString("")
@@ -29,14 +33,13 @@ class FreeReels : MainAPI() {
     
     private val authSalt = "8IAcbWyCsVhYv82S2eofRqK1DF3nNDAv&"
     private val nativeLoginSalt = "8IAcbWyCsVhYv82S2eofRqK1DF3nNDAv"
+    private val cryptoKey = "2r36789f45q01ae5" 
     
     private var sessionToken: String? = null
     private var sessionSecret: String? = null
     private val sessionLock = Mutex()
-    
-    private val nextTokenCache = mutableMapOf<String, String>()
 
-    // 🪄 Kategori Anime dan Segera Hadir sudah dihapus
+    // 🪄 Kategori Segera Hadir dihapus sesuai permintaan
     private data class NativeCategory(val key: String, val name: String, val tabKey: String, val posIndex: Int)
     
     private val nativeCategories = listOf(
@@ -44,7 +47,8 @@ class FreeReels : MainAPI() {
         NativeCategory("new", "New", "995", 10000),
         NativeCategory("dubbing", "Dubbing", "1002", 10000),
         NativeCategory("female", "Perempuan", "994", 10000),
-        NativeCategory("male", "Laki-Laki", "996", 10000)
+        NativeCategory("male", "Laki-Laki", "996", 10000),
+        NativeCategory("anime", "Anime", "1005", 10001)
     )
 
     override val mainPage = mainPageOf(
@@ -52,8 +56,25 @@ class FreeReels : MainAPI() {
         "new" to "New",
         "dubbing" to "Dubbing",
         "female" to "Perempuan",
-        "male" to "Laki-Laki"
+        "male" to "Laki-Laki",
+        "anime" to "Anime"
     )
+
+    private fun decryptIfNeeded(raw: String): String {
+        val text = raw.trim()
+        if (text.startsWith("{") || text.startsWith("[")) return text
+        return try {
+            val decoded = Base64.decode(text, Base64.DEFAULT)
+            val iv = decoded.copyOfRange(0, 16)
+            val payload = decoded.copyOfRange(16, decoded.size)
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            val secretKey = SecretKeySpec(cryptoKey.toByteArray(Charsets.UTF_8), "AES")
+            cipher.init(Cipher.DECRYPT_MODE, secretKey, IvParameterSpec(iv))
+            String(cipher.doFinal(payload), Charsets.UTF_8)
+        } catch (e: Exception) {
+            text
+        }
+    }
 
     private fun md5(input: String): String {
         val md = MessageDigest.getInstance("MD5")
@@ -91,17 +112,14 @@ class FreeReels : MainAPI() {
             "x-device-fingerprint" to "Redmi/sky_global/sky:14/UKQ1.231003.002/V816.0.11.0.UMWMIXM:user/release-keys",
             "session-id" to sessionId,
             "app-name" to "com.freereels.app",
-            "app-version" to "2.2.40",
+            "app-version" to "2.2.91",
             "device-id" to deviceId,
             "device-version" to "34",
             "device" to "android",
             "Authorization" to "oauth_signature=$signature,oauth_token=${sessionToken ?: "undefined"},ts=$ts"
         )
         
-        if (isVip) {
-            headers["internal-user-code"] = "666666" 
-        }
-        
+        if (isVip) headers["internal-user-code"] = "666666" 
         return headers
     }
 
@@ -109,17 +127,10 @@ class FreeReels : MainAPI() {
         if (sessionToken != null) return
         sessionLock.withLock {
             if (sessionToken != null) return@withLock 
-            
             val loginSig = md5(nativeLoginSalt + deviceId)
-            val reqBody = mapOf(
-                "device_id" to deviceId,
-                "device_name" to "Redmi 23090RA98G",
-                "device_sign" to loginSig
-            ).toJson().toRequestBody("application/json".toMediaTypeOrNull())
-            
+            val reqBody = mapOf("device_id" to deviceId, "device_name" to "Redmi 23090RA98G", "device_sign" to loginSig).toJson().toRequestBody("application/json".toMediaTypeOrNull())
             val res = app.post("$nativeApiUrl/anonymous/login", headers = getNativeHeaders(), requestBody = reqBody).text
             val authData = tryParseJson<NativeAuthResponse>(res)
-            
             sessionToken = authData?.data?.authKey ?: authData?.data?.token
             sessionSecret = authData?.data?.authSecret ?: ""
         }
@@ -129,9 +140,8 @@ class FreeReels : MainAPI() {
         if (dataObj == null) return
         fun extract(itemsList: List<UniversalItem>?) {
             itemsList?.forEach { item ->
-                if (!item.title.isNullOrBlank() || !item.name.isNullOrBlank()) {
-                    dest.add(item)
-                }
+                if (item.type?.contains("banner", ignoreCase = true) == true) return@forEach
+                if (!item.title.isNullOrBlank() || !item.name.isNullOrBlank()) dest.add(item)
                 extract(item.items)
                 extract(item.list)
             }
@@ -143,20 +153,14 @@ class FreeReels : MainAPI() {
     }
 
     private suspend fun getCategoryPage(category: NativeCategory, page: Int): Pair<List<UniversalItem>, Boolean> {
-        val url = "$nativeApiUrl/homepage/v2/tab/index?tab_key=${category.tabKey}&position_index=${category.posIndex}&first="
+        val url = "$nativeApiUrl/homepage/v2/tab/index?tab_key=${category.tabKey}&position_index=${category.posIndex}&rec_trigger=0"
         val res = app.get(url, headers = getNativeHeaders(isVip = false)).text 
         val moduleIndex = tryParseJson<UniversalFeedResponse>(res)?.data ?: return emptyList<UniversalItem>() to false
 
         if (page <= 1) {
             val items = mutableListOf<UniversalItem>()
-            moduleIndex.items?.forEach { mod ->
-                mod.items?.let { items.addAll(it) }
-                mod.list?.let { items.addAll(it) }
-            }
-            moduleIndex.list?.forEach { mod ->
-                mod.items?.let { items.addAll(it) }
-                mod.list?.let { items.addAll(it) }
-            }
+            moduleIndex.items?.forEach { mod -> mod.items?.let { items.addAll(it) }; mod.list?.let { items.addAll(it) } }
+            moduleIndex.list?.forEach { mod -> mod.items?.let { items.addAll(it) }; mod.list?.let { items.addAll(it) } }
             if (items.isEmpty()) {
                 moduleIndex.items?.let { items.addAll(it) }
                 moduleIndex.list?.let { items.addAll(it) }
@@ -165,8 +169,7 @@ class FreeReels : MainAPI() {
             return items to hasMore
         }
 
-        val recommendModule = moduleIndex.items?.firstOrNull { it.type == "recommend" }
-            ?: moduleIndex.list?.firstOrNull { it.type == "recommend" }
+        val recommendModule = moduleIndex.items?.firstOrNull { it.type == "recommend" } ?: moduleIndex.list?.firstOrNull { it.type == "recommend" } ?: moduleIndex.modules?.firstOrNull { it.type == "recommend" }
         val recommendKey = recommendModule?.moduleKey ?: category.tabKey
         
         var currentNext = moduleIndex.pageInfo?.next
@@ -181,36 +184,37 @@ class FreeReels : MainAPI() {
         }
 
         val items = mutableListOf<UniversalItem>()
-        currentData?.items?.let { items.addAll(it) }
-        currentData?.list?.let { items.addAll(it) }
-        
-        val hasMore = currentData?.pageInfo?.hasMore == true || !currentNext.isNullOrBlank()
-        
-        return items to hasMore
+        extractMovies(currentData, items)
+        return items to (currentData?.pageInfo?.hasMore == true || !currentNext.isNullOrBlank())
+    }
+
+    private suspend fun findNativeItemBySeriesKey(seriesKey: String): UniversalItem? {
+        for (cat in nativeCategories) {
+            val (items, _) = getCategoryPage(cat, 1)
+            val match = items.firstOrNull { it.key == seriesKey || it.id?.toString() == seriesKey }
+            if (match != null) return match
+        }
+        return null
+    }
+
+    private fun hasPlayableSource(ep: NativeEpisode): Boolean {
+        return !ep.externalAudioH264.isNullOrBlank() || !ep.externalAudioH265.isNullOrBlank() || !ep.m3u8Url.isNullOrBlank() || !ep.videoUrl.isNullOrBlank()
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         ensureSession()
-        
         val cat = nativeCategories.find { it.key == request.data } ?: throw ErrorLoadingException("Kategori tidak ditemukan")
         val (rawItems, hasMore) = getCategoryPage(cat, page)
 
         val items = rawItems.mapNotNull { item -> 
             val title = item.title ?: item.name ?: return@mapNotNull null
             val idStr = item.id?.toString() ?: item.key ?: item.seriesId?.toString() ?: return@mapNotNull null
-            
-            if (title.equals("Ranking", ignoreCase = true) || title.equals("Peringkat", ignoreCase = true) || title.equals("Top", ignoreCase = true)) {
-                return@mapNotNull null
-            }
+            if (title.equals("Ranking", ignoreCase = true) || title.equals("Peringkat", ignoreCase = true) || title.equals("Top", ignoreCase = true)) return@mapNotNull null
             
             val isDubbed = title.contains("Dubbed", true) || title.contains("Sulih Suara", true) || title.contains("(Dub)", true)
-            val cover = item.cover ?: item.verticalCover
-
             newAnimeSearchResponse(title, idStr, TvType.AsianDrama) { 
-                this.posterUrl = fixUrlNull(cover)
-            }.apply { 
-                if (isDubbed) addDubStatus(DubStatus.Dubbed) 
-            }
+                this.posterUrl = fixUrlNull(item.cover ?: item.verticalCover)
+            }.apply { if (isDubbed) addDubStatus(DubStatus.Dubbed) }
         }.distinctBy { it.url }
 
         return newHomePageResponse(request.name, items, hasNext = hasMore)
@@ -229,32 +233,17 @@ class FreeReels : MainAPI() {
             val dataObj = tryParseJson<UniversalFeedResponse>(res)?.data
             if (dataObj != null) {
                 hasMore = dataObj.pageInfo?.hasMore ?: false
-                
-                fun extract(itemsList: List<UniversalItem>?) {
-                    itemsList?.forEach { item ->
-                        if (!item.title.isNullOrBlank() || !item.name.isNullOrBlank()) {
-                            searchItems.add(item)
-                        }
-                        extract(item.items)
-                        extract(item.list)
-                    }
-                }
-                extract(dataObj.items)
-                extract(dataObj.list)
+                extractMovies(dataObj, searchItems)
             }
         } catch (e: Exception) {}
         
         val list = searchItems.mapNotNull { item ->
             val title = item.name ?: item.title ?: return@mapNotNull null
             val idStr = item.id?.toString() ?: item.key ?: item.seriesId?.toString() ?: return@mapNotNull null
-            
             val isDubbed = title.contains("Dubbed", true) || title.contains("Sulih Suara", true) || title.contains("(Dub)", true)
-            
             newAnimeSearchResponse(title, idStr, TvType.AsianDrama) { 
                 this.posterUrl = fixUrlNull(item.cover ?: item.verticalCover)
-            }.apply { 
-                if (isDubbed) addDubStatus(DubStatus.Dubbed) 
-            }
+            }.apply { if (isDubbed) addDubStatus(DubStatus.Dubbed) }
         }.distinctBy { it.url }
         
         return newSearchResponseList(list, hasNext = hasMore)
@@ -266,66 +255,81 @@ class FreeReels : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         ensureSession()
+        val seriesId = url.split("/").last().substringBefore("?")
         
-        val seriesId = url.split("/").last()
+        var info: DramaInfo? = null
         
-        var res = app.get("$nativeApiUrl/drama/info_v2?series_id=$seriesId", headers = getNativeHeaders(isVip = true)).text
-        var info = tryParseJson<NativeDetailResponse>(res)?.data?.info
+        try {
+            val resRaw = app.get("$nativeApiUrl/drama/info_v2?series_id=$seriesId", headers = getNativeHeaders(isVip = true)).text
+            info = tryParseJson<NativeDetailResponse>(resRaw)?.data?.info
+        } catch(e: Exception){}
         
         if (info == null || info.episodeList.isNullOrEmpty()) {
-            val fallbackRes = app.get("$nativeApiUrl/drama/info?series_id=$seriesId", headers = getNativeHeaders(isVip = true)).text
-            val fallbackInfo = tryParseJson<NativeDetailResponse>(fallbackRes)?.data?.info
-            
-            if (fallbackInfo != null && !fallbackInfo.episodeList.isNullOrEmpty()) {
-                info = fallbackInfo
-            } else if (fallbackInfo != null && info == null) {
-                info = fallbackInfo
-            }
+            try {
+                val fallbackUrl = "https://api.mydramawave.com/h5-api/drama/info?series_id=$seriesId"
+                val fallbackResRaw = app.get(fallbackUrl, headers = getNativeHeaders(isVip = true)).text
+                val fallbackRes = decryptIfNeeded(fallbackResRaw)
+                val fallbackInfo = tryParseJson<NativeDetailResponse>(fallbackRes)?.data?.info
+                if (fallbackInfo != null && !fallbackInfo.episodeList.isNullOrEmpty()) info = fallbackInfo
+            } catch(e: Exception){}
         }
 
-        if (info == null) throw ErrorLoadingException("Detail Film tidak ditemukan di server.")
+        var nativeItem: UniversalItem? = null
+        if (info == null || info.episodeList.isNullOrEmpty()) {
+            nativeItem = findNativeItemBySeriesKey(seriesId)
+        }
 
-        val mainCover = fixUrlNull(info.cover ?: info.verticalCover)
+        val mainCover = fixUrlNull(info?.cover ?: info?.verticalCover ?: nativeItem?.cover ?: nativeItem?.verticalCover)
+        val mainTitle = info?.name ?: nativeItem?.title ?: nativeItem?.name ?: "Drama"
+        val mainPlot = info?.desc
 
-        val episodeList = info.episodeList?.mapNotNull { ep -> 
-            newEpisode(ep.toJson()) {
-                this.name = ep.name ?: "Episode ${ep.index}"
-                this.episode = ep.index
+        val episodeList = mutableListOf<Episode>()
+        
+        if (info != null && !info.episodeList.isNullOrEmpty()) {
+            info.episodeList.forEach { ep ->
+                episodeList.add(newEpisode(ep.toJson()) {
+                    this.name = ep.name ?: "Episode ${ep.index}"
+                    this.episode = ep.index
+                    this.posterUrl = fixUrlNull(ep.cover) ?: mainCover 
+                })
+            }
+        } else if (nativeItem?.episodeInfo != null && hasPlayableSource(nativeItem.episodeInfo)) {
+            val ep = nativeItem.episodeInfo
+            episodeList.add(newEpisode(ep.toJson()) {
+                this.name = ep.name ?: mainTitle
+                this.episode = ep.index ?: 1
                 this.posterUrl = fixUrlNull(ep.cover) ?: mainCover 
-            } 
-        } ?: emptyList()
+            })
+        }
 
-        return newTvSeriesLoadResponse(info.name ?: "Drama", url, TvType.AsianDrama, episodeList) {
+        // 🪄 SOLUSI ELEGAN: Jangan throw ErrorLoadingException jika episode kosong.
+        // Biarkan CloudStream yang meng-handle UI-nya dengan poster dan judul yang utuh.
+        if (mainTitle == "Drama" && mainCover == null && episodeList.isEmpty()) {
+             throw ErrorLoadingException("Data film benar-benar hilang dari server.")
+        }
+
+        return newTvSeriesLoadResponse(mainTitle, url, TvType.AsianDrama, episodeList) {
             this.posterUrl = mainCover
-            this.plot = info.desc
+            this.plot = mainPlot
+            // Jika kosong/dihapus, otomatis ditandai sebagai Segera Hadir agar tidak error
             this.comingSoon = episodeList.isEmpty() 
         }
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val ep = tryParseJson<NativeEpisode>(data) ?: return false
-        
         val videoUrl = ep.externalAudioH264 ?: ep.externalAudioH265 ?: ep.m3u8Url ?: ep.videoUrl
         
         if (!videoUrl.isNullOrBlank()) {
             val isM3u8 = videoUrl.contains(".m3u8")
-            callback.invoke(newExtractorLink(
-                source = name,
-                name = name,
-                url = videoUrl,
-                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-            ) {
+            callback.invoke(newExtractorLink(source = name, name = name, url = videoUrl, type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
                 this.headers = mapOf("Origin" to "https://m.mydramawave.com", "Referer" to "https://m.mydramawave.com/")
             })
         }
 
         ep.subtitleList?.forEach { sub ->
             val subUrl = sub.vtt ?: sub.subtitle
-            if (!subUrl.isNullOrBlank()) {
-                subtitleCallback.invoke(
-                    newSubtitleFile(sub.language ?: "id", fixUrl(subUrl))
-                )
-            }
+            if (!subUrl.isNullOrBlank()) subtitleCallback.invoke(newSubtitleFile(sub.language ?: "id", fixUrl(subUrl)))
         }
         return true
     }
@@ -356,21 +360,12 @@ data class UniversalItem(
     @JsonProperty("vertical_cover") val verticalCover: String?,
     @JsonProperty("type") val type: String?, 
     @JsonProperty("module_key") val moduleKey: String?, 
-    @JsonProperty("episode_info") val episodeInfo: NativeEpisodeInfo?,
+    @JsonProperty("episode_info") val episodeInfo: NativeEpisode?, 
     @JsonProperty("items") val items: List<UniversalItem>?,
     @JsonProperty("list") val list: List<UniversalItem>?
 )
 
-data class PageInfo(
-    @JsonProperty("has_more") val hasMore: Boolean?,
-    @JsonProperty("next") val next: String?
-)
-
-data class NativeEpisodeInfo(
-    @JsonProperty("audio") val audio: List<String>?,
-    @JsonProperty("original_audio_language") val originalAudioLanguage: String?,
-    @JsonProperty("new") val isNew: Boolean?
-)
+data class PageInfo(@JsonProperty("has_more") val hasMore: Boolean?, @JsonProperty("next") val next: String?)
 
 data class NativeDetailResponse(@JsonProperty("data") val data: DramaInfoData?)
 data class DramaInfoData(@JsonProperty("info") val info: DramaInfo?)
