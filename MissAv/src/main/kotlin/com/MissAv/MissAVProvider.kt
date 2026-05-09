@@ -82,7 +82,6 @@ class MissAvProvider : MainAPI() {
     override suspend fun search(query: String, page: Int): SearchResponseList? {
         val formattedQuery = query.replace(" ", "+")
         
-        // Cek halaman keberapa yang sedang dimuat, tambahkan ?page= jika lebih dari 1
         val searchUrl = if (page == 1) {
             "$mainUrl/id/search/$formattedQuery"
         } else {
@@ -92,7 +91,6 @@ class MissAvProvider : MainAPI() {
         val document = app.get(searchUrl, headers = headers).document
         val videos = parseVideos(document)
         
-        // Mengembalikan list dengan parameter hasNext supaya CloudStream tau kapan harus berhenti scroll
         return newSearchResponseList(
             list = videos,
             hasNext = videos.isNotEmpty()
@@ -123,9 +121,7 @@ class MissAvProvider : MainAPI() {
                 val recDoc = app.get(recUrl, headers = headers).document
                 val videos = parseVideos(recDoc).filter { it.url != url }
                 recommendations.addAll(videos)
-            } catch (e: Exception) {
-                // Abaikan jika salah satu link gagal
-            }
+            } catch (e: Exception) { }
         }
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
@@ -170,7 +166,57 @@ class MissAvProvider : MainAPI() {
         }
 
         if (m3u8Url != null) {
-            // FIX: Menggunakan pola Lambda Builder dari API CloudStream terbaru
+
+            // ==========================================
+            // EKSTRAKTOR SUBTITLE DARI SUBTITLECAT (MULTI-OPSI)
+            // ==========================================
+            try {
+                val rawCode = data.substringAfterLast("/").substringBefore("?")
+                val codeRegex = Regex("""[a-zA-Z]{2,5}-\d{3,4}""")
+                val videoCode = codeRegex.find(rawCode)?.value ?: rawCode
+                
+                val subSearchUrl = "https://www.subtitlecat.com/index.php?search=$videoCode"
+                val subSearchDoc = app.get(subSearchUrl, headers = headers).document
+
+                // Ambil maksimal 5 hasil teratas dari pencarian SubtitleCat
+                val resultLinks = subSearchDoc.select("table.sub-table tbody tr td a").take(5)
+
+                resultLinks.forEachIndexed { index, element ->
+                    val resultPath = element.attr("href")
+                    
+                    // Ambil teks lengkap sebagai label (contoh: "RBD-541 ut8 (translated from Chinese)")
+                    val subLabel = element.parent()?.text()?.takeIf { it.isNotBlank() } ?: "Opsi ${index + 1}"
+                    
+                    if (resultPath.isNotBlank()) {
+                        var detailUrl = if (resultPath.startsWith("http")) resultPath else "https://www.subtitlecat.com/${resultPath.removePrefix("/")}"
+                        detailUrl = detailUrl.replace(" ", "%20")
+
+                        try {
+                            val subDetailDoc = app.get(detailUrl, headers = headers).document
+                            val indoSubPath = subDetailDoc.selectFirst("#download_id")?.attr("href")
+                            
+                            if (!indoSubPath.isNullOrBlank()) {
+                                var finalDownloadUrl = if (indoSubPath.startsWith("http")) indoSubPath else "https://www.subtitlecat.com/${indoSubPath.removePrefix("/")}"
+                                finalDownloadUrl = finalDownloadUrl.replace(" ", "%20")
+                                
+                                // Kirim setiap subtitle yang berhasil ditemukan ke CloudStream
+                                subtitleCallback.invoke(
+                                    SubtitleFile(
+                                        lang = "ID - $subLabel",
+                                        url = finalDownloadUrl
+                                    )
+                                )
+                            }
+                        } catch (e: Exception) {
+                            // Abaikan error pada satu file agar tidak mengganggu file lainnya
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            // ==========================================
+
             callback.invoke(
                 newExtractorLink(
                     source = this.name,
