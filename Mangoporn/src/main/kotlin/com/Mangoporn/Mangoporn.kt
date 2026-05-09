@@ -25,13 +25,13 @@ class MangoPorn : MainAPI() {
     // 1. MAIN PAGE CONFIGURATION (UPDATED)
     // ==============================
     override val mainPage = mainPageOf(
-        // Kategori Utama (Recent Movies dihapus)
+        // Kategori Utama
         "$mainUrl/trending/" to "Trending",
         "$mainUrl/ratings/" to "Top Rated",
         "$mainUrl/genres/porn-movies/" to "Porn Movies",
         "$mainUrl/xxxclips/" to "XXX Clips",
         
-        // 15 Kategori Tambahan (Filtered)
+        // Kategori Tambahan
         "$mainUrl/genre/18-teens/" to "18+ Teens",
         "$mainUrl/genre/all-girl/" to "All Girl",
         "$mainUrl/genre/all-sex/" to "All Sex",
@@ -66,7 +66,6 @@ class MangoPorn : MainAPI() {
     }
 
     private fun toSearchResult(element: Element): SearchResponse? {
-        // Logic pintar untuk handle Home & Search structure
         val titleElement = element.selectFirst("h3 > a") 
             ?: element.selectFirst("div.title > a")
             ?: element.selectFirst("div.image > a")
@@ -74,7 +73,7 @@ class MangoPorn : MainAPI() {
 
         val title = titleElement.text().trim()
         val url = fixUrl(titleElement.attr("href"))
-        
+    
         val imgElement = element.selectFirst("img")
         val posterUrl = imgElement?.attr("data-wpfc-original-src")?.ifEmpty { 
             imgElement.attr("src") 
@@ -156,13 +155,19 @@ class MangoPorn : MainAPI() {
 
         fun getServerPriority(url: String): Int {
             return when {
-                url.contains("dood") -> 0
-                url.contains("streamtape") -> 1
-                url.contains("voe.sx") -> 2
-                url.contains("vidhide") -> 5
-                url.contains("filemoon") -> 6
-                url.contains("mixdrop") -> 10
-                url.contains("streamsb") -> 11
+                url.contains("dood") || url.contains("playmogo") -> 0
+                url.contains("luluvid") -> 1
+                url.contains("rpmplay") -> 2 
+                url.contains("upns") -> 3
+                url.contains("easyvidplayer") -> 4
+                url.contains("embedseek") -> 5
+                url.contains("seekplayer") -> 6
+                url.contains("streamtape") -> 7
+                url.contains("voe.sx") -> 8
+                url.contains("vidhide") -> 9
+                url.contains("filemoon") -> 10
+                url.contains("mixdrop") -> 11
+                url.contains("streamsb") -> 12
                 else -> 20
             }
         }
@@ -174,8 +179,34 @@ class MangoPorn : MainAPI() {
                 sortedLinks.map { link ->
                     launch(Dispatchers.IO) {
                         try {
-                            loadExtractor(link, data, subtitleCallback, callback)
+                            var finalUrl = link
+                            
+                            // Bypass Doodstream Clone (Playmogo)
+                            if (finalUrl.contains("playmogo.com")) {
+                                finalUrl = finalUrl.replace("playmogo.com", "dood.to")
+                            }
+                            
+                            // Route link ke Custom Extractor yang sudah kita buat (memakai getSafeUrl agar tidak crash)
+                            if (finalUrl.contains("luluvid.com")) {
+                                Luluvid().getSafeUrl(finalUrl, data, subtitleCallback, callback)
+                            } else if (finalUrl.contains("rpmplay.online")) {
+                                RpmPlay().getSafeUrl(finalUrl, data, subtitleCallback, callback)
+                            } else if (finalUrl.contains("upns.online")) {
+                                UpnsOnline().getSafeUrl(finalUrl, data, subtitleCallback, callback)
+                            } else if (finalUrl.contains("easyvidplayer.com")) {
+                                EasyVidPlayer().getSafeUrl(finalUrl, data, subtitleCallback, callback)
+                            } else if (finalUrl.contains("embedseek.online")) {
+                                EmbedSeek().getSafeUrl(finalUrl, data, subtitleCallback, callback)
+                            } else if (finalUrl.contains("seekplayer.vip")) {
+                                SeekPlayer().getSafeUrl(finalUrl, data, subtitleCallback, callback)
+                            } else if (finalUrl.contains("streamtape.com")) {
+                                StreamtapeCustom().getSafeUrl(finalUrl, data, subtitleCallback, callback)
+                            } else {
+                                // Eksekutor bawaan Cloudstream untuk server-server lain
+                                loadExtractor(finalUrl, data, subtitleCallback, callback)
+                            }
                         } catch (e: Exception) {
+                            // Abaikan error di satu server agar server lain tetap dicoba
                         }
                     }
                 }
@@ -185,4 +216,109 @@ class MangoPorn : MainAPI() {
 
         return false
     }
+}
+
+// ==========================================
+// KUMPULAN CUSTOM EXTRACTOR
+// ==========================================
+
+class Luluvid : ExtractorApi() {
+    override var name = "Luluvid"
+    override var mainUrl = "https://luluvid.com"
+    override val requiresReferer = true
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val response = app.get(url, referer = referer).text
+        val m3u8Regex = Regex("file\"?\\s*:\\s*\"(https?://[^\"]+\\.m3u8[^\"]*)\"")
+        var match = m3u8Regex.find(response)
+        
+        if (match == null) {
+            val unpacked = getAndUnpack(response)
+            match = m3u8Regex.find(unpacked)
+        }
+
+        if (match != null) {
+            val m3u8Url = match.groupValues[1]
+            callback.invoke(
+                newExtractorLink(
+                    source = this.name,
+                    name = this.name,
+                    url = m3u8Url,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = url
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+        }
+    }
+}
+
+class StreamtapeCustom : ExtractorApi() {
+    override var name = "Streamtape"
+    override var mainUrl = "https://streamtape.com"
+    override val requiresReferer = false
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val response = app.get(url).text
+        val part1 = Regex("""innerHTML\s*=\s*['"](//[^'"]+get_video[^'"]+)['"]""").find(response)?.groupValues?.get(1)
+        val part2Regex = Regex("""\+\s*(?:\([^)]+\)\s*\+\s*)?['"]([^'"]+)['"]""")
+        val part2Matches = part2Regex.findAll(response).toList()
+        val part2 = if (part2Matches.isNotEmpty()) part2Matches.last().groupValues[1] else ""
+
+        if (part1 != null) {
+            var videoUrl = "https:$part1$part2"
+            if (!videoUrl.contains("&stream=1")) {
+                videoUrl += "&stream=1"
+            }
+
+            callback.invoke(
+                newExtractorLink(
+                    source = this.name,
+                    name = this.name,
+                    url = videoUrl,
+                    type = ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = url
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+        }
+    }
+}
+
+// Pasukan Kloningan Vidhide (Menggunakan VidhideExtractor dengan var)
+class RpmPlay : com.lagradost.cloudstream3.extractors.VidhideExtractor() {
+    override var name = "RpmPlay"
+    override var mainUrl = "https://my.rpmplay.online"
+}
+
+class UpnsOnline : com.lagradost.cloudstream3.extractors.VidhideExtractor() {
+    override var name = "UpnsOnline"
+    override var mainUrl = "https://my.upns.online"
+}
+
+class EasyVidPlayer : com.lagradost.cloudstream3.extractors.VidhideExtractor() {
+    override var name = "EasyVidPlayer"
+    override var mainUrl = "https://p.easyvidplayer.com"
+}
+
+class EmbedSeek : com.lagradost.cloudstream3.extractors.VidhideExtractor() {
+    override var name = "EmbedSeek"
+    override var mainUrl = "https://my.embedseek.online"
+}
+
+class SeekPlayer : com.lagradost.cloudstream3.extractors.VidhideExtractor() {
+    override var name = "SeekPlayer"
+    override var mainUrl = "https://vip.seekplayer.vip"
 }
