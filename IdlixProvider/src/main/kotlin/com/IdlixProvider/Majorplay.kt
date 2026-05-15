@@ -5,6 +5,8 @@ import com.lagradost.api.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 
 class Majorplay : ExtractorApi() {
     override var name = "Majorplay"
@@ -21,36 +23,38 @@ class Majorplay : ExtractorApi() {
             val claimToken = url.substringAfter("claim=").substringBefore("&")
             if (claimToken.isEmpty() || !url.contains("claim=")) return
             
-            // 1. IDENTITAS WEB ASLI (Dinamis dari Cloudstream)
-            // IdlixProvider.kt akan mengirimkan https://z1.idlixku.com/ ke sini
-            val actualReferer = referer ?: "https://z1.idlixku.com/"
-            val actualOrigin = actualReferer.trimEnd('/') 
+            val actualOrigin = "https://z1.idlixku.com"
+            val actualReferer = "https://z1.idlixku.com/"
             val userAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
 
-            // 2. PENUKARAN TIKET: WAJIB MENGGUNAKAN IDENTITAS IDLIX (BUKAN MAJORPLAY)
-            val response = app.post(
-                url = "$mainUrl/api/play",
-                headers = mapOf(
-                    "Origin" to actualOrigin,
-                    "Referer" to actualReferer,
-                    "Accept" to "*/*",
-                    "User-Agent" to userAgent,
-                    // Tambahan header Content-Type yang terbaca di log network-mu
-                    "Content-Type" to "text/plain" 
-                ),
-                json = mapOf("claim" to claimToken) // Payload tetap menggunakan format Object JSON
-            ).parsedSafe<NewMajorplayResponse>() ?: return
+            val rawJsonString = "{\"claim\":\"$claimToken\"}"
+            val requestBody = rawJsonString.toRequestBody("text/plain;charset=UTF-8".toMediaTypeOrNull())
 
-            val videoUrl = response.url ?: return
-            
-            // 3. HEADER PEMUTARAN VIDEO: JUGA MENGGUNAKAN IDENTITAS IDLIX
-            val streamHeaders = mapOf(
+            // Jubah Gaib Lengkap Anti-Blokir
+            val safeHeaders = mapOf(
                 "Origin" to actualOrigin,
                 "Referer" to actualReferer,
                 "User-Agent" to userAgent,
-                "Accept" to "*/*"
+                "Accept" to "*/*",
+                "Accept-Language" to "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+                "sec-ch-ua" to "\"Chromium\";v=\"137\", \"Not/A)Brand\";v=\"24\"",
+                "sec-ch-ua-mobile" to "?1",
+                "sec-ch-ua-platform" to "\"Android\"",
+                "sec-fetch-dest" to "empty",
+                "sec-fetch-mode" to "cors",
+                "sec-fetch-site" to "cross-site"
             )
 
+            // Menukar Tiket di Majorplay
+            val response = app.post(
+                url = "$mainUrl/api/play",
+                headers = safeHeaders,
+                requestBody = requestBody
+            ).parsedSafe<NewMajorplayResponse>() ?: return
+
+            val videoUrl = response.url ?: return
+
+            // Panggil subtitle
             response.subtitles?.forEach { sub ->
                 val subUrl = sub.path ?: return@forEach
                 val subLang = sub.label ?: sub.lang ?: "Unknown"
@@ -59,17 +63,22 @@ class Majorplay : ExtractorApi() {
                 )
             }
 
-            // Melempar Master Playlist config.json ke ExoPlayer
+            // ==========================================
+            // KUNCI KEMENANGAN MUTLAK
+            // Serahkan link Master Playlist mentah-mentah agar Cloudstream 
+            // menugaskan ExoPlayer membedahnya secara otomatis. 
+            // Jika muncul "Trek 0, 1, 2", abaikan saja! Itu cacat server dari Majorplay.
+            // ==========================================
             callback.invoke(
                 newExtractorLink(
                     source = name,
                     name = name,
                     url = videoUrl,
-                    type = ExtractorLinkType.M3U8
+                    type = ExtractorLinkType.M3U8 
                 ) {
                     this.referer = actualReferer
                     this.quality = Qualities.Unknown.value
-                    this.headers = streamHeaders
+                    this.headers = safeHeaders
                 }
             )
 
