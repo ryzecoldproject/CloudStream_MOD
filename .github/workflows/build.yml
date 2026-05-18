@@ -11,7 +11,7 @@ on:
       - main
     paths-ignore:
       - '*.md'
-workflow_dispatch:
+  workflow_dispatch: # Tambahan ini agar tombol "Run workflow" muncul di GitHub Actions
 
 permissions:
   contents: write
@@ -56,7 +56,6 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/src
           touch local.properties
-          # Masukkan logic secret kamu disini jika perlu (seperti di kode sebelumnya)
 
       - name: Build Plugins
         run: |
@@ -99,6 +98,6 @@ jobs:
           git add .
           
           # Commit dan Push
-          # Kita pakai --amend agar history git tidak membengkak (opsional, tapi bagus)
+          # Kita pakai --amend agar history git tidak membengkak
           git commit --amend -m "Build update: $GITHUB_SHA" || git commit -m "Build update: $GITHUB_SHA"
           git push --force
