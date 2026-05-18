@@ -1,0 +1,9 @@
+{
+    "name": "RSMV Stream_Cloud Alt",
+    "iconUrl": "https://raw.githubusercontent.com/michat88/Zaneta/main/Icons/Adi.png",
+    "description": "Repository Plugin Michat88",
+    "manifestVersion": 1,
+    "pluginLists": [
+      "https://raw.githubusercontent.com/ryzecoldproject/CloudStream_MOD/builds/plugins.json"
+    ]
+}
