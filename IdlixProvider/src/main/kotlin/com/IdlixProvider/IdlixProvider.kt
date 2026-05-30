@@ -5,6 +5,7 @@ import com.lagradost.api.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.nicehttp.RequestBodyTypes
@@ -14,7 +15,7 @@ import kotlinx.coroutines.delay
 import java.util.UUID
 
 class IdlixProvider : MainAPI() {
-    override var mainUrl = "https://z1.idlixku.com"
+    override var mainUrl = "https://z2.idlixku.com"
     override var name = "Idlix"
     override val hasMainPage = true
     override var lang = "id"
@@ -74,8 +75,7 @@ class IdlixProvider : MainAPI() {
                         val slug = content.slug ?: continue
                         
                         val typeRaw = item.contentType ?: content.contentType ?: ""
-                        val isSeries = typeRaw.contains("series", true) ||
-                                typeRaw.contains("episode", true)
+                        val isSeries = typeRaw.contains("series", true) || typeRaw.contains("episode", true)
                         
                         val displayTitle = formatTitle(rawTitle, item.numberOfSeasons ?: content.numberOfSeasons)
                         val href = "$mainUrl/${if (isSeries) "series" else "movie"}/$slug"
@@ -88,7 +88,6 @@ class IdlixProvider : MainAPI() {
                                 newTvSeriesSearchResponse(displayTitle, href, TvType.TvSeries) {
                                     this.posterUrl = posterUrl
                                     this.quality = getQualityFromString(content.quality ?: "")
-                                    this.score = Score.from10(content.voteAverage)
                                 }
                             )
                         } else {
@@ -96,7 +95,6 @@ class IdlixProvider : MainAPI() {
                                 newMovieSearchResponse(displayTitle, href, TvType.Movie) {
                                     this.posterUrl = posterUrl
                                     this.quality = getQualityFromString(content.quality ?: "")
-                                    this.score = Score.from10(content.voteAverage)
                                 }
                             )
                         }
@@ -139,7 +137,6 @@ class IdlixProvider : MainAPI() {
                             newTvSeriesSearchResponse(displayTitle, href, TvType.TvSeries) {
                                 this.posterUrl = posterUrl
                                 this.quality = getQualityFromString(item.quality ?: "")
-                                this.score = Score.from10(item.voteAverage)
                             }
                         )
                     } else {
@@ -147,7 +144,6 @@ class IdlixProvider : MainAPI() {
                             newMovieSearchResponse(displayTitle, href, TvType.Movie) {
                                 this.posterUrl = posterUrl
                                 this.quality = getQualityFromString(item.quality ?: "")
-                                this.score = Score.from10(item.voteAverage)
                             }
                         )
                     }
@@ -176,7 +172,6 @@ class IdlixProvider : MainAPI() {
                 
                 val typeRaw = item.contentType ?: ""
                 val isSeries = typeRaw.contains("series", true)
-            
                 val displayTitle = formatTitle(rawTitle, item.numberOfSeasons)
                 val href = "$mainUrl/${if (isSeries) "series" else "movie"}/$slug"
                 val posterPath = item.posterPath
@@ -188,7 +183,6 @@ class IdlixProvider : MainAPI() {
                         newTvSeriesSearchResponse(displayTitle, href, TvType.TvSeries) {
                             this.posterUrl = posterUrl
                             this.quality = getQualityFromString(item.quality ?: "")
-                            this.score = Score.from10(item.voteAverage)
                         }
                     )
                 } else {
@@ -196,7 +190,6 @@ class IdlixProvider : MainAPI() {
                         newMovieSearchResponse(displayTitle, href, TvType.Movie) {
                             this.posterUrl = posterUrl
                             this.quality = getQualityFromString(item.quality ?: "")
-                            this.score = Score.from10(item.voteAverage)
                         }
                     )
                 }
@@ -221,7 +214,6 @@ class IdlixProvider : MainAPI() {
         val plot = response.overview
         val year = (response.releaseDate ?: response.firstAirDate)?.split("-")?.firstOrNull()?.toIntOrNull()
         
-        val ratingStr = response.voteAverage?.toFloatOrNull()?.times(10)?.toInt()?.toString()
         val trailer = response.trailerUrl
         val tags = response.genres?.mapNotNull { it.name }
         
@@ -274,7 +266,6 @@ class IdlixProvider : MainAPI() {
                 this.year = year
                 this.plot = plot
                 this.tags = tags
-                this.score = Score.from10(ratingStr)
                 addSeasonNames(seasonNamesList) 
                 if (actors != null) addActors(actors)
                 addTrailer(trailer)
@@ -282,14 +273,13 @@ class IdlixProvider : MainAPI() {
         } else {
             val movieId = response.id ?: slug
             val loadData = "movie|$movieId|$url"
-             
+            
             return newMovieLoadResponse(title, url, TvType.Movie, loadData) {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = background
                 this.year = year
                 this.plot = plot
                 this.tags = tags
-                this.score = Score.from10(ratingStr)
                 if (actors != null) addActors(actors)
                 addTrailer(trailer)
             }
@@ -326,27 +316,65 @@ class IdlixProvider : MainAPI() {
                 contentType = if (isSeries) "episode" else "movie"
             }
 
-            // REKAYASA GENERATOR DID COOKIE SECARA MANDIRI AGAR TIDAK ANULIR BACKEND
+            // Pancing CookieJar NiceHttp agar mengaktifkan Cloudflare Solver internal
+            app.get(mainUrl)
+
+            // Setup Cookies buatan kita secara terpisah
             val randomDid = UUID.randomUUID().toString().replace("-", "")
+            val customCookies = mapOf(
+                "did" to randomDid,
+                "NEXT_LOCALE" to "id"
+            )
             
             val headers = mapOf(
                 "Referer" to refererUrl, 
                 "Origin" to mainUrl, 
-                "Cookie" to "did=$randomDid; NEXT_LOCALE=id",
                 "Accept" to "application/json, text/plain, */*",
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+                "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
             )
 
-            // 1. Ambil gateToken dari play-info menggunakan Rest JSON Parser eksplisit
-            val playInfoResText = app.get(
-                url = "$mainUrl/api/watch/play-info/$contentType/$contentId",
-                headers = headers
-            ).text
-            val playInfoRes = AppUtils.parseJson<PlayInfoResponse>(playInfoResText)
+            val targetPlayInfoUrl = "$mainUrl/api/watch/play-info/$contentType/$contentId"
 
-            val gateToken = playInfoRes.gateToken ?: return false
+            // 1. Eksekusi Request API Reguler (Cepat)
+            var playInfoResText = runCatching {
+                app.get(
+                    url = targetPlayInfoUrl,
+                    headers = headers,
+                    cookies = customCookies
+                ).text
+            }.getOrNull() ?: ""
+
+            var playInfoRes = runCatching { AppUtils.parseJson<PlayInfoResponse>(playInfoResText) }.getOrNull()
+
+            // 2. FALLBACK WEBVIEWRESOLVER: Aktif jika API reguler diblokir Cloudflare (gateToken gagal diraih)
+            if (playInfoRes?.gateToken == null) {
+                Log.d("adixtream", "Terkena blokir Cloudflare. Menjalankan Fallback WebViewResolver...")
+                
+                val webViewResolver = WebViewResolver(
+                    interceptUrl = Regex(".*api/watch/play-info.*"),
+                    useOkhttp = false // Wajib false agar WebView merender JS Cloudflare
+                )
+                
+                // Buka WebView tersembunyi untuk memecahkan Cloudflare.
+                // Setelah selesai, cookie cf_clearance otomatis tersimpan di CookieManager aplikasi.
+                webViewResolver.resolveUsingWebView(
+                    url = targetPlayInfoUrl,
+                    headers = headers
+                )
+                
+                // Request ulang dengan API reguler (sekarang sudah berbekal tiket cf_clearance)
+                playInfoResText = app.get(
+                    url = targetPlayInfoUrl,
+                    headers = headers,
+                    cookies = customCookies
+                ).text
+                
+                playInfoRes = AppUtils.parseJson<PlayInfoResponse>(playInfoResText)
+            }
+
+            val gateToken = playInfoRes?.gateToken ?: return false
             
-            // 2. BYPASS PROTEKSI WAKTU IKLAN (TIME-LOCK)
+            // 3. BYPASS PROTEKSI WAKTU IKLAN (TIME-LOCK)
             val serverNow = playInfoRes.serverNow ?: 0L
             val unlockAt = playInfoRes.unlockAt ?: 0L
             val countdownSec = playInfoRes.preroll?.countdownSec ?: 7L
@@ -357,20 +385,21 @@ class IdlixProvider : MainAPI() {
             val finalWaitMs = maxOf(baseWaitMs, diffTimeMs) + 1000L
             delay(finalWaitMs)
 
-            // 3. Handshake Tahap 2: Klaim token streaming dengan menyertakan kuki Device ID buatan kita
+            // 4. Handshake Tahap 2: Klaim token streaming
             val jsonMediaType = RequestBodyTypes.JSON.toMediaTypeOrNull()
             val requestBodyData = mapOf("gateToken" to gateToken).toJson().toRequestBody(jsonMediaType)
             
             val claimResText = app.post(
                 url = "$mainUrl/api/watch/session/claim",
                 headers = headers,
+                cookies = customCookies,
                 requestBody = requestBodyData
             ).text
             
             val claimParsed = AppUtils.parseJson<SessionClaimResponse>(claimResText)
             val claim = claimParsed.claim ?: return false
             
-            // 4. Potong kompas panggil Extractor secara direct melewati batasan Registry Core
+            // 5. Bypass Majorplay
             val fakeUrl = "https://e2e.majorplay.net/play?claim=$claim"
             Majorplay().getUrl(fakeUrl, refererUrl, subtitleCallback, callback)
             
