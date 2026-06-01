@@ -1,18 +1,21 @@
 package com.LayarKacaProvider
 
+import android.content.Context
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
-import android.content.Context
 
 @CloudstreamPlugin
 class LayarKacaPlugin : Plugin() {
     override fun load(context: Context) {
-        // Mendaftarkan Provider Utama
+        // Mendaftarkan Main Provider (LayarKaca21)
         registerMainAPI(LayarKacaProvider())
+
+        // Mendaftarkan semua Extractor tambahan agar terbaca oleh sistem CloudStream
+        registerExtractorAPI(Lk21TurboExtractor())
+        registerExtractorAPI(HowNetworkExtractor())
+        registerExtractorAPI(CastExtractor())
         
-        // Mendaftarkan 3 Extractor Utama (Tanpa Hydrax)
-        registerExtractorAPI(P2PExtractor())
-        registerExtractorAPI(EmturbovidExtractor())
-        registerExtractorAPI(F16Extractor())
+        // Mendaftarkan Extractor Hydrax (Abyss) yang baru saja kita tambahkan
+        // registerExtractorAPI(HydraxExtractor())
     }
 }
