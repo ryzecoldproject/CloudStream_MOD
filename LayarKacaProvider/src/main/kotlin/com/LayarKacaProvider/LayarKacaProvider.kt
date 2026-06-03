@@ -11,9 +11,6 @@ import okhttp3.Interceptor
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 
 class LayarKacaProvider : MainAPI() {
     override var mainUrl = "https://tv10.lk21official.cc"
@@ -21,6 +18,56 @@ class LayarKacaProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "id"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+
+    // =========================================================================
+    // KATEGORI LENGKAP & ANTI-DDOS (SESUAI WEB LK21)
+    // =========================================================================
+    override val mainPage = mainPageOf(
+        "latest/" to "Film Terbaru",
+        "top-series-today/" to "Series Unggulan",
+        "latest-series/" to "Series Update",
+        "populer/" to "Top Bulan Ini",
+        "nonton-bareng-keluarga/" to "Nonton Bareng Keluarga",
+        "genre/action/" to "Action Terbaru",
+        "genre/romance/" to "Romance Terbaru",
+        "genre/comedy/" to "Comedy Terbaru",
+        "genre/horror/" to "Horror Terbaru",
+        "country/south-korea/" to "Korea Terbaru",
+        "country/thailand/" to "Thailand Terbaru",
+        "country/india/" to "India Terbaru"
+    )
+
+    // Fitur wajib agar server LK21 tidak memblokir koneksi kita
+    override var sequentialMainPage = true
+    override var sequentialMainPageDelay = 250L
+
+    // =========================================================================
+    // INFINITE SCROLL HOME PAGE
+    // =========================================================================
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        // Aturan Path LK21: Halaman 1 tanpa "page/1", Halaman 2 dst menggunakan "page/x/"
+        val url = if (page == 1) {
+            "$mainUrl/${request.data}"
+        } else {
+            "$mainUrl/${request.data}page/$page/"
+        }
+
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept" to "*/*",
+            "Referer" to "$mainUrl/"
+        )
+
+        val document = app.get(url, headers = headers).document
+        val elements = document.select("div#post-container article, div.grid-archive article, div.widget article, article.item")
+        
+        // Mem-parsing secara instan (tanpa delay TMDB)
+        val list = elements.mapNotNull { element ->
+            toSearchResult(element)
+        }
+
+        return newHomePageResponse(request, list, list.isNotEmpty())
+    }
 
     // =========================================================================
     // RC4 DECRYPT
@@ -47,9 +94,6 @@ class LayarKacaProvider : MainAPI() {
         } catch (e: Exception) { "" }
     }
 
-    // =========================================================================
-    // HELPERS
-    // =========================================================================
     private fun getCleanTitle(title: String): String {
         var clean = title.replace(Regex("(?i)(nonton serial|nonton film|nonton|sub indo|di lk21|lk21|layarkaca21)"), "")
         clean = clean.replace(Regex("(?i)\\bseason\\s*\\d+.*"), "")
@@ -62,12 +106,10 @@ class LayarKacaProvider : MainAPI() {
         var cleanUrl = url
         if (cleanUrl.startsWith("//")) cleanUrl = "https:$cleanUrl"
         cleanUrl = cleanUrl.substringBefore("?")
+        // Menghapus ukuran thumbnail agar mendapatkan poster HD murni dari LK21
         return cleanUrl.replace(Regex("-\\d{2,4}x\\d{2,4}"), "")
     }
 
-    // =========================================================================
-    // DATA CLASSES
-    // =========================================================================
     data class TmdbSearchResponse(val results: List<TmdbResult>?)
     data class TmdbResult(
         val backdrop_path: String?,
@@ -87,34 +129,13 @@ class LayarKacaProvider : MainAPI() {
         @JsonProperty("type") val type: String?,
         @JsonProperty("poster") val poster: String?,
         @JsonProperty("quality") val quality: String?,
-        @JsonProperty("rating") val rating: Double?, 
         @JsonProperty("year") val year: Int?
     )
 
     // =========================================================================
-    // MAIN PAGE
+    // PARSING ITEM FILM INSTAN (BEBAS TMDB LIMIT)
     // =========================================================================
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val document = app.get(mainUrl).document
-        val items = ArrayList<HomePageList>()
-
-        suspend fun addWidget(sectionTitle: String, selector: String) {
-            val elements = document.select(selector).toList()
-            val list = coroutineScope {
-                elements.map { async { toSearchResult(it) } }.awaitAll().filterNotNull()
-            }
-            if (list.isNotEmpty()) items.add(HomePageList(sectionTitle, list))
-        }
-
-        addWidget("Film Terbaru",     "div.widget[data-type='latest-movies'] li.slider article")
-        addWidget("Series Unggulan",  "div.widget[data-type='top-series-today'] li.slider article")
-        addWidget("Horror Terbaru",   "div.widget[data-type='latest-horror'] li.slider article")
-        addWidget("Daftar Lengkap",   "div#post-container article")
-
-        return newHomePageResponse(items)
-    }
-
-    private suspend fun toSearchResult(element: Element): SearchResponse? {
+    private fun toSearchResult(element: Element): SearchResponse? {
         val rawTitle = element.select("h3.poster-title, h2.entry-title, h1.page-title, div.title").text().trim()
         if (rawTitle.isEmpty()) return null
         val href = fixUrl(element.select("a").first()?.attr("href") ?: return null)
@@ -123,27 +144,14 @@ class LayarKacaProvider : MainAPI() {
         val rawPoster = imgElement?.attr("data-src")?.takeIf { it.isNotBlank() }
             ?: imgElement?.attr("data-lazy-src")?.takeIf { it.isNotBlank() }
             ?: imgElement?.attr("src")
-        val fallbackPoster = fixPosterUrl(rawPoster)
-
+        
+        // Kita gunakan poster HD dari LK21 saja agar beranda dimuat dalam 0 detik!
+        val posterUrl = fixPosterUrl(rawPoster)
         val cleanTitle = getCleanTitle(rawTitle)
         val yearText = element.select("div.year, span.year").text()
         val year = yearText.toIntOrNull()
             ?: Regex("\\b(\\d{4})\\b").find(rawTitle)?.groupValues?.get(1)?.toIntOrNull()
 
-        var hdPoster: String? = null
-        try {
-            val encodedTitle = URLEncoder.encode(cleanTitle, "UTF-8")
-            val tmdbRes = app.get(
-                "https://api.themoviedb.org/3/search/multi?api_key=1865f43a0549ca50d341dd9ab8b29f49&query=$encodedTitle"
-            ).parsedSafe<TmdbSearchResponse>()
-            val match = tmdbRes?.results?.firstOrNull {
-                val resYear = (it.release_date ?: it.first_air_date)?.take(4)?.toIntOrNull()
-                year == null || resYear == null || resYear == year
-            } ?: tmdbRes?.results?.firstOrNull()
-            hdPoster = match?.poster_path?.let { "https://image.tmdb.org/t/p/w500$it" }
-        } catch (e: Exception) {}
-
-        val posterUrl = hdPoster ?: fallbackPoster
         val quality  = getQualityFromString(element.select("span.label").text())
         val isSeries = element.select("span.episode").isNotEmpty()
             || element.select("span.duration").text().contains("S.")
@@ -159,81 +167,48 @@ class LayarKacaProvider : MainAPI() {
         }
     }
 
-    // =========================================================================
-    // SEARCH
-    // =========================================================================
     override suspend fun search(query: String, page: Int): SearchResponseList? {
         val searchUrl = "https://gudangvape.com/search.php?s=$query&page=$page"
         val headers = mapOf(
             "Origin"     to mainUrl,
             "Referer"    to "$mainUrl/",
-            "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
+            "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36"
         )
         
         try {
             val response = app.get(searchUrl, headers = headers).parsedSafe<LkSearchResponse>() ?: return null
 
-            val results = coroutineScope {
-                response.data?.mapNotNull { item ->
-                    async {
-                        val rawTitle = item.title ?: return@async null
-                        val slug = item.slug ?: return@async null
+            val results = response.data?.mapNotNull { item ->
+                val rawTitle = item.title ?: return@mapNotNull null
+                val slug = item.slug ?: return@mapNotNull null
 
-                        val cleanTitle = getCleanTitle(rawTitle)
-                        val href = fixUrl(slug)
-                        
-                        val rawPoster = item.poster?.let { "https://poster.showcdnx.com/wp-content/uploads/$it" }
-                        val fallbackPoster = fixPosterUrl(rawPoster)
+                val cleanTitle = getCleanTitle(rawTitle)
+                val href = fixUrl(slug)
+                
+                val rawPoster = item.poster?.let { "https://poster.showcdnx.com/wp-content/uploads/$it" }
+                val posterUrl = fixPosterUrl(rawPoster)
 
-                        var hdPoster: String? = null
-                        try {
-                            val encodedTitle = URLEncoder.encode(cleanTitle, "UTF-8")
-                            val tmdbRes = app.get(
-                                "https://api.themoviedb.org/3/search/multi?api_key=1865f43a0549ca50d341dd9ab8b29f49&query=$encodedTitle"
-                            ).parsedSafe<TmdbSearchResponse>()
-                            
-                            val match = tmdbRes?.results?.firstOrNull {
-                                val resYear = (it.release_date ?: it.first_air_date)?.take(4)?.toIntOrNull()
-                                item.year == null || resYear == null || resYear == item.year
-                            } ?: tmdbRes?.results?.firstOrNull()
-                            
-                            hdPoster = match?.poster_path?.let { "https://image.tmdb.org/t/p/w500$it" }
-                        } catch (e: Exception) {}
+                val quality = getQualityFromString(item.quality)
+                val type = if (item.type?.contains("series", ignoreCase = true) == true) TvType.TvSeries else TvType.Movie
 
-                        val posterUrl = hdPoster ?: fallbackPoster
-                        val quality = getQualityFromString(item.quality)
-                        val type = if (item.type?.contains("series", ignoreCase = true) == true) TvType.TvSeries else TvType.Movie
-
-                        if (type == TvType.TvSeries) {
-                            newTvSeriesSearchResponse(cleanTitle, href, TvType.TvSeries) {
-                                this.posterUrl = posterUrl
-                                this.quality = quality
-                                this.year = item.year
-                            }
-                        } else {
-                            newMovieSearchResponse(cleanTitle, href, TvType.Movie) {
-                                this.posterUrl = posterUrl
-                                this.quality = quality
-                                this.year = item.year
-                            }
-                        }
+                if (type == TvType.TvSeries) {
+                    newTvSeriesSearchResponse(cleanTitle, href, TvType.TvSeries) {
+                        this.posterUrl = posterUrl; this.quality = quality; this.year = item.year
                     }
-                }?.awaitAll()?.filterNotNull() ?: emptyList()
-            }
+                } else {
+                    newMovieSearchResponse(cleanTitle, href, TvType.Movie) {
+                        this.posterUrl = posterUrl; this.quality = quality; this.year = item.year
+                    }
+                }
+            } ?: emptyList()
 
             val totalPages = response.totalPages ?: 1
-            val hasNext = page < totalPages
-
-            return newSearchResponseList(results, hasNext)
-            
+            return newSearchResponseList(results, page < totalPages)
         } catch (e: Exception) {
             return null
         }
     }
 
-    // =========================================================================
-    // LOAD
-    // =========================================================================
     override suspend fun load(url: String): LoadResponse {
         var cleanUrl = fixUrl(url)
         var response = app.get(cleanUrl)
@@ -320,6 +295,7 @@ class LayarKacaProvider : MainAPI() {
             }
         }
 
+        // TMDB dipanggil di Load untuk Banner Background (Aman, hanya 1 request)
         var tmdbPoster: String? = null
         var tmdbBackdrop: String? = null
         try {
@@ -366,9 +342,6 @@ class LayarKacaProvider : MainAPI() {
         }
     }
 
-    // =========================================================================
-    // LOAD LINKS
-    // =========================================================================
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -430,22 +403,20 @@ class LayarKacaProvider : MainAPI() {
         }
 
         val allSources = rawSources.distinct().map { fixUrl(it) }
+        
         allSources.forEach { url ->
-            // Routing TurboVIP
-            if (url.contains("playeriframe.sbs/iframe/turbovip/")) {
-                val id = url.substringAfter("turbovip/").substringBefore("/")
+            if (url.contains("/iframe/turbovip/")) {
+                val id = url.substringAfter("/iframe/turbovip/").substringBefore("/")
                 Lk21TurboExtractor().getUrl("https://turbovidhls.com/t/$id", currentUrl)
                     ?.forEach { callback.invoke(it) }
             } 
-            // Routing HowNetwork (P2P)
-            else if (url.contains("playeriframe.sbs/iframe/p2p/")) {
-                val id = url.substringAfter("p2p/").substringBefore("/")
+            else if (url.contains("/iframe/p2p/")) {
+                val id = url.substringAfter("/iframe/p2p/").substringBefore("/")
                 HowNetworkExtractor().getUrl("https://cloud.hownetwork.xyz/video.php?id=$id", currentUrl)
                     ?.forEach { callback.invoke(it) }
             } 
-            // Routing CAST (Mesin Independen Anti-Bot)
-            else if (url.contains("playeriframe.sbs/iframe/cast/")) {
-                val id = url.substringAfter("cast/").substringBefore("/")
+            else if (url.contains("/iframe/cast/")) {
+                val id = url.substringAfter("/iframe/cast/").substringBefore("/")
                 val castUrl = "https://weneverbeenfree.com/e/$id"
                 try {
                     CastExtractor().getUrl(castUrl, null)?.forEach { callback.invoke(it) }
@@ -453,12 +424,11 @@ class LayarKacaProvider : MainAPI() {
                     e.printStackTrace()
                 }
             }
-            // Routing Hydrax (Abyss)
-            else if (url.contains("playeriframe.sbs/iframe/hydrax/")) {
-                val id = url.substringAfter("hydrax/").substringBefore("/")
-                val hydraxUrl = "https://abysscdn.com/?v=$id"
+            else if (url.contains("/iframe/hydrax/")) {
+                val id = url.substringAfter("/iframe/hydrax/").substringBefore("/")
+                val hydraxUrl = "https://abyssplayer.com/?v=$id"
                 try {
-                    HydraxExtractor().getUrl(hydraxUrl, currentUrl)?.forEach { callback.invoke(it) }
+                    AbyssExtractor().getUrl(hydraxUrl, currentUrl, subtitleCallback, callback)
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -467,18 +437,19 @@ class LayarKacaProvider : MainAPI() {
         return true
     }
 
-    // =========================================================================
-    // VIDEO INTERCEPTOR — Fix seek error HTTP 429 (Google Drive CDN) dll
-    // =========================================================================
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
-        val mobileUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
+        val mobileUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36"
 
         return Interceptor { chain ->
             val originalRequest = chain.request()
-            val url             = originalRequest.url.toString()
-
+            val url = originalRequest.url.toString()
+            
+            // Bypass Localhost
+            if (url.contains("127.0.0.1")) {
+                return@Interceptor chain.proceed(originalRequest)
+            }
+            
             when {
-                // ── Turbovidhls & etvp & hownetwork: tambah header Origin + Referer ──────
                 url.contains("turbovidhls.com") || url.contains("etvp.cc") || url.contains("hownetwork.xyz") -> {
                     val newRequest = originalRequest.newBuilder()
                         .header("User-Agent", mobileUA)
@@ -487,25 +458,21 @@ class LayarKacaProvider : MainAPI() {
                         .build()
                     chain.proceed(newRequest)
                 }
-
-                // ── Google Drive CDN: retry dengan exponential backoff ───────
                 url.contains("googleusercontent.com") -> {
                     var response  = chain.proceed(originalRequest)
                     var retries   = 0
-                    val maxRetries = 4                       // maks 4x retry
-                    val baseDelay  = 600L                   // mulai 600ms
+                    val maxRetries = 4
+                    val baseDelay  = 600L
 
                     while (response.code == 429 && retries < maxRetries) {
                         response.close()
-                        val delay = baseDelay * (retries + 1) // 600 → 1200 → 1800 → 2400 ms
+                        val delay = baseDelay * (retries + 1)
                         Thread.sleep(delay)
                         response = chain.proceed(originalRequest)
                         retries++
                     }
                     response
                 }
-
-                // ── Domain lain: lewat tanpa modifikasi ──────────────────────
                 else -> chain.proceed(originalRequest)
             }
         }

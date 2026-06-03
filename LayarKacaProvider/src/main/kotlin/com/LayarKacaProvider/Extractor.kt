@@ -1,8 +1,8 @@
 package com.LayarKacaProvider
 
 import android.util.Base64
+import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -12,19 +12,52 @@ import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.annotation.JsonProperty
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Request
+import okhttp3.Response
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketException
+import java.net.URLEncoder
 import java.security.KeyPairGenerator
+import java.security.MessageDigest
 import java.security.Signature
 import java.security.spec.ECGenParameterSpec
 import java.security.interfaces.ECPublicKey
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import kotlin.concurrent.thread
+
+val mapper: ObjectMapper = jacksonObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
 
 // =========================================================================
-// DATA CLASSES UNTUK API (ANTI-MINIFY BUG)
+// DATA CLASSES UNTUK TYPE-SAFE JSON PARSING (ANTI-WARNING)
 // =========================================================================
+data class HydraxData(
+    @JsonProperty("slug") val slug: String? = null,
+    @JsonProperty("md5_id") val md5_id: String? = null,
+    @JsonProperty("user_id") val user_id: String? = null,
+    @JsonProperty("media") val media: String? = null
+)
+
+data class HydraxMedia(
+    @JsonProperty("mp4") val mp4: HydraxMp4? = null
+)
+
+data class HydraxMp4(
+    @JsonProperty("sources") val sources: List<HydraxSource>? = null
+)
+
+data class HydraxSource(
+    @JsonProperty("label") val label: String? = null,
+    @JsonProperty("codec") val codec: String? = null,
+    @JsonProperty("path") val path: String? = null,
+    @JsonProperty("url") val url: String? = null
+)
+
 data class HowNetworkResponse(
     @JsonProperty("poster") val poster: String?,
     @JsonProperty("file") val file: String?,
@@ -56,10 +89,244 @@ data class CastSource(
     @JsonProperty("type") val type: String?
 )
 
-val mapper: ObjectMapper = jacksonObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+// =========================================================================
+// MESIN SERVER PROXY LOKAL (OBAT ANTI-CRONET & ANTI-EOF)
+// =========================================================================
+object HydraxProxy {
+    var port: Int = 0
+    private var isRunning = false
+    private var serverSocket: ServerSocket? = null
+
+    fun start() {
+        if (isRunning) return
+        try {
+            serverSocket = ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"))
+            port = serverSocket!!.localPort
+            isRunning = true
+            thread {
+                while (isRunning) {
+                    try {
+                        val client = serverSocket!!.accept()
+                        thread { handleClient(client) }
+                    } catch (e: Exception) {}
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun handleClient(client: Socket) {
+        var response: Response? = null
+        try {
+            client.soTimeout = 15000 
+            
+            val reader = BufferedReader(InputStreamReader(client.getInputStream()))
+            val output = client.getOutputStream()
+
+            val requestLine = reader.readLine() ?: return
+            val parts = requestLine.split(" ")
+            if (parts.size < 2) return
+            val path = parts[1]
+
+            if (!path.contains("?url=")) return
+            
+            val query = path.substringAfter("?")
+            val params = query.split("&").associate { 
+                val kv = it.split("=")
+                kv[0] to (if (kv.size > 1) kv[1] else "")
+            }
+            
+            val encodedUrl = params["url"] ?: return
+            val keyHex = params["key"] ?: return
+            val realUrl = String(Base64.decode(encodedUrl, Base64.URL_SAFE))
+
+            var rangeHeader: String? = null
+            while (true) {
+                val line = reader.readLine()
+                if (line.isNullOrEmpty()) break
+                if (line.lowercase().startsWith("range:")) {
+                    rangeHeader = line.substringAfter(":").trim()
+                }
+            }
+
+            val reqStart = rangeHeader?.replace("bytes=", "")?.split("-")?.get(0)?.toLongOrNull() ?: 0L
+
+            val request = Request.Builder()
+                .url(realUrl)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                .header("Referer", "https://abyssplayer.com/")
+                .header("Origin", "https://abyssplayer.com")
+                .header("Accept-Encoding", "identity")
+                .apply {
+                    if (rangeHeader != null) header("Range", rangeHeader)
+                }
+                .build()
+
+            response = app.baseClient.newCall(request).execute()
+
+            if (!response.isSuccessful) return
+
+            val code = response.code
+            output.write("HTTP/1.1 $code ${response.message}\r\n".toByteArray())
+            for ((key, value) in response.headers) {
+                if (key.equals("transfer-encoding", true) || 
+                    key.equals("content-encoding", true) || 
+                    key.equals("connection", true)) continue
+                output.write("$key: $value\r\n".toByteArray())
+            }
+            output.write("Connection: close\r\n\r\n".toByteArray())
+
+            // Perbaikan Warning 1: body diproses tanpa elvis operator (?:)
+            val body = response.body
+            val inputStream = body.byteStream()
+
+            val keyBytes = keyHex.toByteArray(Charsets.UTF_8)
+            val secretKey = SecretKeySpec(keyBytes, "AES")
+            val ivSpec = IvParameterSpec(keyBytes.copyOfRange(0, 16))
+            val cipher = Cipher.getInstance("AES/CTR/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
+
+            if (reqStart > 0 && reqStart < 65536) {
+                cipher.update(ByteArray(reqStart.toInt()))
+            }
+
+            var offset = reqStart
+            val buffer = ByteArray(32768)
+            var bytesRead: Int
+
+            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                if (offset < 65536) {
+                    val n = minOf(bytesRead.toLong(), 65536L - offset).toInt()
+                    val decrypted = cipher.update(buffer, 0, n)
+                    if (decrypted != null) {
+                        output.write(decrypted)
+                    }
+                    if (n < bytesRead) {
+                        output.write(buffer, n, bytesRead - n)
+                    }
+                } else {
+                    output.write(buffer, 0, bytesRead)
+                }
+                offset += bytesRead
+                output.flush() 
+            }
+        } catch (e: SocketException) {
+            // Wajar saat user melakukan seek brutal
+        } catch (e: Exception) {
+            // Abaikan error streaming putus
+        } finally {
+            try { response?.close() } catch (e: Exception) {}
+            try { client.close() } catch (e: Exception) {}
+        }
+    }
+}
 
 // =========================================================================
-// EXTRACTOR 1: TURBO VIP
+// EXTRACTOR 1: ABYSS / HYDRAX (TRANSPARENT LOCAL PROXY)
+// =========================================================================
+open class AbyssExtractor : ExtractorApi() {
+    override val name = "Abyss"
+    override val mainUrl = "https://abyssplayer.com"
+    override val requiresReferer = true
+
+    private fun baseHeaders(referer: String): Map<String, String> = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
+        "Referer"    to referer,
+        "Origin"     to mainUrl,
+        "Accept"     to "*/*"
+    )
+
+    override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
+        val pageRef = referer ?: "$mainUrl/"
+        val slug = extractSlugFromUrl(url) ?: return
+        val hdrs = baseHeaders(pageRef)
+
+        try {
+            val html = app.get("$mainUrl/?v=$slug", headers = hdrs).text
+            val datas = Regex("""datas\s*=\s*"([^"]+)"""").find(html)?.groupValues?.get(1) ?: return
+
+            // Perbaikan Warning 2-5: Parsing menggunakan Type-Safe Data Classes
+            val decodedDatas = String(android.util.Base64.decode(datas, android.util.Base64.DEFAULT), Charsets.ISO_8859_1)
+            val dataJson = mapper.readValue(decodedDatas, HydraxData::class.java)
+
+            val infoSlug = dataJson.slug ?: slug
+            val md5Id = dataJson.md5_id ?: return
+            val userId = dataJson.user_id ?: return
+            val mediaStr = dataJson.media ?: return
+
+            val hashInput = "$userId:$infoSlug:$md5Id".toByteArray(Charsets.UTF_8)
+            val md5Hash = MessageDigest.getInstance("MD5").digest(hashInput)
+            val keyHex = md5Hash.joinToString("") { "%02x".format(it) }
+
+            val keyBytes = keyHex.toByteArray(Charsets.UTF_8)
+            val ivBytes = keyBytes.copyOfRange(0, 16)
+
+            val cipher = Cipher.getInstance("AES/CTR/NoPadding")
+            val secretKey = SecretKeySpec(keyBytes, "AES")
+            val ivSpec = IvParameterSpec(ivBytes)
+            cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
+
+            val decryptedBytes = cipher.doFinal(mediaStr.toByteArray(Charsets.ISO_8859_1))
+            val mediaJson = mapper.readValue(String(decryptedBytes, Charsets.UTF_8), HydraxMedia::class.java)
+
+            val mp4Sources = mediaJson.mp4?.sources
+
+            mp4Sources?.forEach { src ->
+                val label = src.label ?: "Unknown"
+                val codec = src.codec ?: "h264"
+                val path = src.path ?: ""
+                val baseUrl = src.url ?: ""
+
+                if (path.isNotEmpty() && baseUrl.isNotEmpty()) {
+                    val srcUrl = "$baseUrl/$path"
+
+                    val filename = path.substringAfterLast("/")
+                    val fnHash = MessageDigest.getInstance("MD5").digest(filename.toByteArray(Charsets.UTF_8))
+                    val fnKeyHex = fnHash.joinToString("") { "%02x".format(it) }
+
+                    HydraxProxy.start()
+
+                    val encodedUrl = android.util.Base64.encodeToString(srcUrl.toByteArray(), android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP)
+                    val localProxyUrl = "http://127.0.0.1:${HydraxProxy.port}/?url=$encodedUrl&key=$fnKeyHex"
+
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = name,
+                            url = localProxyUrl,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = pageRef
+                            this.quality = labelToQuality(label)
+                        }
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun extractSlugFromUrl(url: String): String? {
+        val vParam = url.substringAfter("?v=", "").substringBefore("&")
+        if (vParam.isNotEmpty() && url.contains("?v=")) return vParam
+        Regex("""(?:e|embed|v|play)/([a-zA-Z0-9_\-]{6,20})""").find(url)?.groupValues?.get(1)?.let { return it }
+        return url.split("?").first().trimEnd('/').split('/').lastOrNull()?.takeIf { it.matches(Regex("[a-zA-Z0-9_\\-]{6,20}")) }
+    }
+
+    private fun labelToQuality(label: String): Int = when {
+        label.contains("2160") || label.contains("4k", ignoreCase = true) -> Qualities.P2160.value
+        label.contains("1440") -> Qualities.P1440.value
+        label.contains("1080") -> Qualities.P1080.value
+        label.contains("720") -> Qualities.P720.value
+        label.contains("480") -> Qualities.P480.value
+        else -> Qualities.Unknown.value
+    }
+}
+
+// =========================================================================
+// EXTRACTOR 2: TURBO VIP
 // =========================================================================
 open class Lk21TurboExtractor : ExtractorApi() {
     override var name      = "LK21 TurboVIP"
@@ -73,7 +340,7 @@ open class Lk21TurboExtractor : ExtractorApi() {
             if (id.isEmpty()) return null
 
             val headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
+                "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
                 "Referer"    to "https://playeriframe.sbs/"
             )
 
@@ -112,7 +379,7 @@ open class Lk21TurboExtractor : ExtractorApi() {
 }
 
 // =========================================================================
-// EXTRACTOR 2: HOW NETWORK (P2P)
+// EXTRACTOR 3: HOW NETWORK (P2P)
 // =========================================================================
 open class HowNetworkExtractor : ExtractorApi() {
     override var name = "LK21 HowNetwork"
@@ -131,7 +398,7 @@ open class HowNetworkExtractor : ExtractorApi() {
                     "Origin" to mainUrl,
                     "Referer" to url,
                     "Accept" to "*/*",
-                    "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
+                    "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36"
                 ),
                 data = mapOf(
                     "r" to "https://playeriframe.sbs/",
@@ -167,21 +434,21 @@ open class HowNetworkExtractor : ExtractorApi() {
 }
 
 // =========================================================================
-// EXTRACTOR 3: CAST HD (Anti-Bot Bypass FileLion/Byse V19)
+// EXTRACTOR 4: CAST HD
 // =========================================================================
 open class CastExtractor : ExtractorApi() {
     override var name = "CAST HD"
     override var mainUrl = "https://weneverbeenfree.com"
     override val requiresReferer = false
 
-    private fun b64url(b: ByteArray): String = Base64.encodeToString(b, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+    private fun b64url(b: ByteArray): String = android.util.Base64.encodeToString(b, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)
     private fun b64urlDecode(s: String): ByteArray {
         var standardized = s.replace("-", "+").replace("_", "/")
         val padding = 4 - (standardized.length % 4)
         if (padding != 4) {
             standardized += "=".repeat(padding)
         }
-        return Base64.decode(standardized, Base64.DEFAULT)
+        return android.util.Base64.decode(standardized, android.util.Base64.DEFAULT)
     }
     private fun getRandomBytes(size: Int): ByteArray = ByteArray(size).apply { java.security.SecureRandom().nextBytes(this) }
 
@@ -198,6 +465,7 @@ open class CastExtractor : ExtractorApi() {
         
         val rPadded = ByteArray(32) { 0 }
         val sPadded = ByteArray(32) { 0 }
+    
         System.arraycopy(rStr, 0, rPadded, 32 - rStr.size, rStr.size)
         System.arraycopy(sStr, 0, sPadded, 32 - sStr.size, sStr.size)
         
@@ -209,7 +477,7 @@ open class CastExtractor : ExtractorApi() {
         val videoId = url.substringAfterLast("/")
         
         val commonHeaders = mapOf(
-            "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
+            "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
             "Origin" to mainUrl,
             "Referer" to url,
             "X-Embed-Origin" to "playeriframe.sbs",
@@ -220,6 +488,7 @@ open class CastExtractor : ExtractorApi() {
         try {
             val chalRes = app.post("$mainUrl/api/videos/access/challenge", headers = commonHeaders)
             val chalJson = try { mapper.readValue(chalRes.text, CastChalResp::class.java) } catch(e:Exception){ null } ?: return null
+    
             val nonce = chalJson.nonce ?: return null
             val cid = chalJson.challenge_id ?: return null
 
@@ -241,7 +510,7 @@ open class CastExtractor : ExtractorApi() {
             if (xBytes.size < 32) xBytes = ByteArray(32 - xBytes.size) { 0 } + xBytes
             if (yBytes.size < 32) yBytes = ByteArray(32 - yBytes.size) { 0 } + yBytes
 
-            val attestPayloadStr = mapper.writeValueAsString(mapOf(
+            val attestPayload = mapOf(
                 "viewer_id" to b64url(getRandomBytes(16)),
                 "device_id" to b64url(getRandomBytes(16)),
                 "challenge_id" to cid,
@@ -253,14 +522,14 @@ open class CastExtractor : ExtractorApi() {
                 ),
                 "client" to mapOf("user_agent" to commonHeaders["User-Agent"]!!),
                 "attributes" to mapOf("entropy" to "high")
-            ))
+            )
 
-            val attestRes = app.post("$mainUrl/api/videos/access/attest", headers = commonHeaders, requestBody = attestPayloadStr.toRequestBody("application/json".toMediaTypeOrNull()))
+            val attestRes = app.post("$mainUrl/api/videos/access/attest", headers = commonHeaders, json = attestPayload)
             val attestJson = try { mapper.readValue(attestRes.text, CastAttestResp::class.java) } catch(e:Exception){ null } ?: return null
             val token = attestJson.token ?: return null
 
-            val pbPayloadStr = mapper.writeValueAsString(mapOf("fingerprint" to mapOf("token" to token)))
-            val pbRes = app.post("$mainUrl/api/videos/$videoId/embed/playback", headers = commonHeaders, requestBody = pbPayloadStr.toRequestBody("application/json".toMediaTypeOrNull()))
+            val pbPayload = mapOf("fingerprint" to mapOf("token" to token))
+            val pbRes = app.post("$mainUrl/api/videos/$videoId/embed/playback", headers = commonHeaders, json = pbPayload)
             
             val pbResp = try { mapper.readValue(pbRes.text, CastPbResp::class.java)?.playback } catch(e:Exception){ null } ?: return null
             val iv = b64urlDecode(pbResp.iv ?: return null)
@@ -316,7 +585,6 @@ open class CastExtractor : ExtractorApi() {
                     ) {
                         this.referer = "$mainUrl/"
                         this.quality = Qualities.Unknown.value
-                        
                         this.headers = mapOf(
                             "Origin" to mainUrl,
                             "Referer" to "$mainUrl/",
@@ -328,189 +596,6 @@ open class CastExtractor : ExtractorApi() {
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return sources
-    }
-}
-
-// =========================================================================
-// EXTRACTOR 4: HYDRAX (ABYSS) - FIXED v2 (Session-Aware + M3U8 Priority)
-// =========================================================================
-open class HydraxExtractor : ExtractorApi() {
-    override var name = "Hydrax"
-    override var mainUrl = "https://abysscdn.com"
-    override val requiresReferer = false
-
-    override suspend fun getUrl(url: String, referer: String?): List<ExtractorLink>? {
-        val sources = mutableListOf<ExtractorLink>()
-
-        val iosUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
-
-        // ─────────────────────────────────────────────────────────────────
-        // JS HOOK v2:
-        //  - P2P dimatikan
-        //  - Intercept XMLHttpRequest DAN fetch untuk tangkap URL GCS
-        //    SEBELUM browser mulai streaming (agar URL masih segar)
-        //  - Prioritas: m3u8 > mp4
-        //  - Intercept network request langsung dari JWPlayer setup
-        // ─────────────────────────────────────────────────────────────────
-        val jsHook = """
-            (function() {
-                try {
-                    // 1. Matikan P2P total
-                    Object.defineProperty(navigator, 'serviceWorker', { value: undefined, configurable: true });
-                    window.MediaSource = undefined;
-                    window.RTCPeerConnection = undefined;
-                    window.WebRTC = undefined;
-
-                    // 2. Intercept XMLHttpRequest untuk tangkap URL GCS lebih awal
-                    const _origOpen = XMLHttpRequest.prototype.open;
-                    XMLHttpRequest.prototype.open = function(method, xhrUrl, ...rest) {
-                        if (typeof xhrUrl === 'string' && 
-                            (xhrUrl.includes('storage.googleapis.com') || 
-                             xhrUrl.includes('.m3u8') || 
-                             xhrUrl.includes('.mp4'))) {
-                            // Trigger fetch dummy agar WebViewResolver intercept URL ini
-                            try { fetch(xhrUrl + (xhrUrl.includes('?') ? '&' : '?') + '_wvr=1'); } catch(e) {}
-                        }
-                        return _origOpen.apply(this, [method, xhrUrl, ...rest]);
-                    };
-
-                    // 3. Intercept fetch
-                    const _origFetch = window.fetch;
-                    window.fetch = function(fetchUrl, opts) {
-                        if (typeof fetchUrl === 'string' &&
-                            (fetchUrl.includes('storage.googleapis.com') ||
-                             fetchUrl.includes('.m3u8') ||
-                             fetchUrl.includes('.mp4'))) {
-                            // Duplikat request agar resolver bisa tangkap
-                            try { _origFetch(fetchUrl); } catch(e) {}
-                        }
-                        return _origFetch.apply(this, arguments);
-                    };
-
-                    // 4. Hook JWPlayer setup - prioritas m3u8, fallback mp4
-                    let hooked = false;
-                    let checkInt = setInterval(() => {
-                        if (!hooked && window.jwplayer && typeof jwplayer === 'function') {
-                            const proto = jwplayer.prototype || Object.getPrototypeOf(jwplayer());
-                            if (proto && proto.setup) {
-                                hooked = true;
-                                const originalSetup = proto.setup;
-                                proto.setup = function(config) {
-                                    try {
-                                        const pl = config.playlist || config;
-                                        const items = Array.isArray(pl) ? pl : [pl];
-                                        for (const item of items) {
-                                            const srcs = item.sources || [];
-                                            // Prioritas 1: cari m3u8/hls
-                                            const m3u8src = srcs.find(s => 
-                                                (s.file && s.file.includes('.m3u8')) || 
-                                                s.type === 'hls' || 
-                                                s.type === 'application/x-mpegURL');
-                                            // Prioritas 2: mp4
-                                            const mp4src = srcs.find(s => 
-                                                s.file && s.file.includes('.mp4'));
-                                            
-                                            const chosen = m3u8src || mp4src || srcs[0];
-                                            if (chosen && chosen.file) {
-                                                window.fetch(chosen.file);
-                                            }
-                                        }
-                                    } catch(e) {}
-                                    return originalSetup.apply(this, arguments);
-                                };
-                                clearInterval(checkInt);
-                            }
-                        }
-                    }, 50);
-                    setTimeout(() => clearInterval(checkInt), 15000);
-                } catch(e) {}
-            })();
-        """.trimIndent()
-
-        try {
-            // ─────────────────────────────────────────────────────────────
-            // Regex diperluas: tangkap m3u8, mp4, dan URL GCS langsung
-            // ─────────────────────────────────────────────────────────────
-            val interceptRegex = Regex(
-                ".*storage\\.googleapis\\.com.*\\.mp4.*" +
-                "|.*\\.(m3u8|mp4)(\\?|#|$).*" +
-                "|.*\\.m3u8.*"
-            )
-
-            val (request, _) = WebViewResolver(
-                interceptUrl = interceptRegex,
-                userAgent = iosUA,
-                script = jsHook
-            ).resolveUsingWebView(
-                url = url,
-                referer = referer ?: "https://playeriframe.sbs/"
-            )
-
-            val rawUrl = request?.url?.toString() ?: return sources
-
-            // ─────────────────────────────────────────────────────────────
-            // FIX UTAMA:
-            // Jangan buang fragment (#...) karena bisa jadi token Hydrax!
-            // Hanya bersihkan dummy param yang kita tambahkan sendiri.
-            // ─────────────────────────────────────────────────────────────
-            val cleanUrl = rawUrl
-                .replace("?_wvr=1", "")
-                .replace("&_wvr=1", "")
-                .replace("?hy=resolve.m3u8", "")
-                .replace("&hy=resolve.m3u8", "")
-            // TIDAK ada substringBefore("#") karena fragment bisa jadi token auth GCS!
-
-            if (cleanUrl.isBlank()) return sources
-
-            // ─────────────────────────────────────────────────────────────
-            // Ambil cookies dari WebView session - PENTING untuk GCS auth!
-            // ─────────────────────────────────────────────────────────────
-            val wvCookieManager = android.webkit.CookieManager.getInstance()
-            val abyssCookies = wvCookieManager.getCookie("abysscdn.com") ?: ""
-            val abyssPlayerCookies = wvCookieManager.getCookie("abyssplayer.com") ?: ""
-            val gcsCookies = wvCookieManager.getCookie("storage.googleapis.com") ?: ""
-            val allCookies = listOf(abyssCookies, abyssPlayerCookies, gcsCookies)
-                .filter { it.isNotBlank() }
-                .joinToString("; ")
-
-            val isM3u8 = cleanUrl.contains(".m3u8", ignoreCase = true)
-            val isGCS = cleanUrl.contains("storage.googleapis.com", ignoreCase = true)
-            val isMp4 = !isM3u8 && (cleanUrl.contains(".mp4", ignoreCase = true) || isGCS)
-
-            val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-
-            val headers = buildMap {
-                put("User-Agent", iosUA)
-                put("Origin", mainUrl)
-                put("Referer", "$mainUrl/")
-                // Kirim cookies WebView agar GCS session valid
-                if (allCookies.isNotBlank()) put("Cookie", allCookies)
-                // Header extra untuk GCS
-                if (isGCS) {
-                    put("Accept", "video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5")
-                    put("Accept-Encoding", "identity;q=1, *;q=0")
-                    put("Range", "bytes=0-")
-                }
-            }
-
-            sources.add(
-                newExtractorLink(
-                    source = "Hydrax (Abyss)",
-                    name = if (isM3u8) "Hydrax HD" else "Hydrax HD (MP4)",
-                    url = cleanUrl,
-                    type = linkType
-                ) {
-                    this.referer = "$mainUrl/"
-                    this.quality = Qualities.Unknown.value
-                    this.headers = headers
-                }
-            )
-
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
         return sources
     }
 }
