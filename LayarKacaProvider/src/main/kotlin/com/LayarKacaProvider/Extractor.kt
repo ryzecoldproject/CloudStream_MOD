@@ -1,6 +1,7 @@
 package com.LayarKacaProvider
 
 import android.util.Base64
+import android.util.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
@@ -19,7 +20,6 @@ import java.io.InputStreamReader
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
-import java.net.URLEncoder
 import java.security.KeyPairGenerator
 import java.security.MessageDigest
 import java.security.Signature
@@ -90,12 +90,24 @@ data class CastSource(
 )
 
 // =========================================================================
-// MESIN SERVER PROXY LOKAL (OBAT ANTI-CRONET & ANTI-EOF)
+// MESIN SERVER PROXY LOKAL (OBAT ANTI-CRONET & BYPASS LIMIT 512MB HYDRAX)
 // =========================================================================
 object HydraxProxy {
     var port: Int = 0
     private var isRunning = false
     private var serverSocket: ServerSocket? = null
+
+    // Dispatcher khusus untuk membongkar limit koneksi OkHttp (Anti-antre saat seek)
+    private val proxyClient by lazy {
+        app.baseClient.newBuilder()
+            .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .dispatcher(okhttp3.Dispatcher().apply { 
+                maxRequests = 100
+                maxRequestsPerHost = 100 
+            })
+            .build()
+    }
 
     fun start() {
         if (isRunning) return
@@ -112,15 +124,16 @@ object HydraxProxy {
                 }
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e("HydraxProxy", "Gagal start server proxy: ${e.message}")
         }
     }
 
     private fun handleClient(client: Socket) {
         var response: Response? = null
+        val clientId = System.currentTimeMillis().toString().takeLast(5)
+        
         try {
             client.soTimeout = 15000 
-            
             val reader = BufferedReader(InputStreamReader(client.getInputStream()))
             val output = client.getOutputStream()
 
@@ -151,34 +164,102 @@ object HydraxProxy {
             }
 
             val reqStart = rangeHeader?.replace("bytes=", "")?.split("-")?.get(0)?.toLongOrNull() ?: 0L
+            Log.i("HydraxProxy", "[$clientId] [->] EXO MINTA RANGE : ${rangeHeader ?: "FULL (bytes=0-)"}")
+
+            // ====================================================================
+            // FORMULA INJEKSI SERVICE WORKER HYDRAX (PEMECAH CHUNK 512 MB)
+            // ====================================================================
+            val LIMIT_512MB = 536870912L // Persis 512 MB
+            val partIndex = reqStart / LIMIT_512MB
+            val localOffset = reqStart % LIMIT_512MB
+
+            // Modifikasi URL asli untuk melompat ke Part yang tepat (contoh: url, url1, url2)
+            val targetUrl = if (partIndex > 0) "$realUrl$partIndex" else realUrl
+
+            // Request Range yang dikirim ke Hydrax harus direset sesuai offset part-nya
+            val serverRangeHeader = "bytes=$localOffset-"
+            // ====================================================================
 
             val request = Request.Builder()
-                .url(realUrl)
+                .url(targetUrl)
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                 .header("Referer", "https://abyssplayer.com/")
                 .header("Origin", "https://abyssplayer.com")
-                .header("Accept-Encoding", "identity")
-                .apply {
-                    if (rangeHeader != null) header("Range", rangeHeader)
-                }
+                .header("Accept-Encoding", "identity") // Wajib identity agar tidak di-gzip
+                .header("Range", serverRangeHeader)
                 .build()
 
-            response = app.baseClient.newCall(request).execute()
-
-            if (!response.isSuccessful) return
-
+            val startTime = System.currentTimeMillis()
+            Log.d("HydraxProxy", "[$clientId] [*] Meneruskan request ke Hydrax Part $partIndex...")
+            
+            response = proxyClient.newCall(request).execute()
+            val timeTaken = System.currentTimeMillis() - startTime
+            
             val code = response.code
+
+            // ====================================================================
+            // MANIPULASI HEADER BALASAN UNTUK MEMBOHONGI EXOPLAYER (SPOOFING)
+            // ====================================================================
+            // FIX: Menggunakan Elvis Operator (?:) agar tipe terdeteksi tegas sebagai String Non-null
+            var contentRange = response.header("Content-Range") ?: "Kosong"
+            var contentLength = response.header("Content-Length") ?: "Kosong"
+            var spoofedContentRange = contentRange
+
+            if (code == 206 && contentRange != "Kosong") {
+                try {
+                    // Contoh format dari server: "bytes 0-536870911/536870912"
+                    val rangeData = contentRange.replace("bytes ", "", ignoreCase = true).split("/")
+                    if (rangeData.size == 2) {
+                        val rangePositions = rangeData[0].split("-")
+                        if (rangePositions.size == 2) {
+                            val serverStart = rangePositions[0].toLong()
+                            val serverEnd = rangePositions[1].toLong()
+                            
+                            // Kalkulasi ulang (Spoofing) dengan mengembalikan index ke skala aslinya
+                            val spoofedStart = serverStart + (partIndex * LIMIT_512MB)
+                            val spoofedEnd = serverEnd + (partIndex * LIMIT_512MB)
+                            
+                            // Gunakan * (wildcard) untuk total file agar ExoPlayer bisa meminta sisa file dengan dinamis
+                            spoofedContentRange = "bytes $spoofedStart-$spoofedEnd/*" 
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w("HydraxProxy", "[$clientId] Gagal memanipulasi Content-Range: ${e.message}")
+                }
+            }
+
+            Log.i("HydraxProxy", "[$clientId] [<-] RESPON HYDRAX   : HTTP $code | Waktu: ${timeTaken}ms | C-Range: $spoofedContentRange | C-Length: $contentLength")
+
+            // Tulis header HTTP balasan ke Player
             output.write("HTTP/1.1 $code ${response.message}\r\n".toByteArray())
             for ((key, value) in response.headers) {
                 if (key.equals("transfer-encoding", true) || 
                     key.equals("content-encoding", true) || 
-                    key.equals("connection", true)) continue
+                    key.equals("connection", true) ||
+                    key.equals("content-range", true)) continue // Abaikan content-range asli dari server
                 output.write("$key: $value\r\n".toByteArray())
             }
+
+            // Kirim Content-Range hasil spoofing jika status 206
+            if (code == 206 && spoofedContentRange != "Kosong") {
+                output.write("Content-Range: $spoofedContentRange\r\n".toByteArray())
+            }
+
             output.write("Connection: close\r\n\r\n".toByteArray())
 
-            // Perbaikan Warning 1: body diproses tanpa elvis operator (?:)
+            // Wajib memanggil flush() di sini!
+            output.flush()
+
+            if (!response.isSuccessful) {
+                Log.w("HydraxProxy", "[$clientId] [!] Hydrax Error $code. Header berhasil diteruskan ke ExoPlayer. Memutus body stream.")
+                return
+            }
+
             val body = response.body
+            if (body == null) {
+                Log.w("HydraxProxy", "[$clientId] [!] Body response dari Hydrax null!")
+                return
+            }
             val inputStream = body.byteStream()
 
             val keyBytes = keyHex.toByteArray(Charsets.UTF_8)
@@ -187,11 +268,16 @@ object HydraxProxy {
             val cipher = Cipher.getInstance("AES/CTR/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
 
+            // Menggunakan reqStart original karena cipher offset terikat dengan file utuh
             if (reqStart > 0 && reqStart < 65536) {
                 cipher.update(ByteArray(reqStart.toInt()))
+                Log.d("HydraxProxy", "[$clientId] [+] Cipher dimajukan sebanyak $reqStart byte")
+            } else if (reqStart >= 65536) {
+                Log.d("HydraxProxy", "[$clientId] [+] Bypass dekripsi karena offset >= 64KB ($reqStart)")
             }
 
             var offset = reqStart
+            var totalSent = 0L
             val buffer = ByteArray(32768)
             var bytesRead: Int
 
@@ -209,15 +295,21 @@ object HydraxProxy {
                     output.write(buffer, 0, bytesRead)
                 }
                 offset += bytesRead
+                totalSent += bytesRead
                 output.flush() 
             }
+            val finalTime = (System.currentTimeMillis() - startTime - timeTaken) / 1000.0
+            val kbps = if (finalTime > 0) (totalSent / 1024.0) / finalTime else 0.0
+            Log.i("HydraxProxy", "[$clientId] [OK] Streaming Selesai. Total: $totalSent bytes | Speed: ${String.format("%.2f", kbps)} KB/s")
+
         } catch (e: SocketException) {
-            // Wajar saat user melakukan seek brutal
+            Log.w("HydraxProxy", "[$clientId] [X] ExoPlayer memutus koneksi/Seek/Cancel: ${e.message ?: "Broken Pipe/Connection Reset"}")
         } catch (e: Exception) {
-            // Abaikan error streaming putus
+            Log.e("HydraxProxy", "[$clientId] [!] Error Stream putus di tengah jalan: ${e.message}")
         } finally {
             try { response?.close() } catch (e: Exception) {}
             try { client.close() } catch (e: Exception) {}
+            Log.d("HydraxProxy", "[$clientId] [-] Socket ditutup & Memori dibersihkan.")
         }
     }
 }
@@ -246,7 +338,6 @@ open class AbyssExtractor : ExtractorApi() {
             val html = app.get("$mainUrl/?v=$slug", headers = hdrs).text
             val datas = Regex("""datas\s*=\s*"([^"]+)"""").find(html)?.groupValues?.get(1) ?: return
 
-            // Perbaikan Warning 2-5: Parsing menggunakan Type-Safe Data Classes
             val decodedDatas = String(android.util.Base64.decode(datas, android.util.Base64.DEFAULT), Charsets.ISO_8859_1)
             val dataJson = mapper.readValue(decodedDatas, HydraxData::class.java)
 
