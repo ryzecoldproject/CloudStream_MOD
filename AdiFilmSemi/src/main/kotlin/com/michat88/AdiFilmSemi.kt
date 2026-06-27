@@ -1,25 +1,10 @@
 package com.michat88
 
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.michat88.AdiFilmSemiExtractor.invokeAdiDewasa
-import com.michat88.AdiFilmSemiExtractor.invokeKisskh 
 import com.michat88.AdiFilmSemiExtractor.invokeAdimoviebox
-import com.michat88.AdiFilmSemiExtractor.invokeAdimoviebox2 
-import com.michat88.AdiFilmSemiExtractor.invokeGomovies
-import com.michat88.AdiFilmSemiExtractor.invokeIdlix
-import com.michat88.AdiFilmSemiExtractor.invokeMapple
-import com.michat88.AdiFilmSemiExtractor.invokeSuperembed
-import com.michat88.AdiFilmSemiExtractor.invokeVidfast
+import com.michat88.AdiFilmSemiExtractor.invokeAdimoviebox2
+import com.michat88.AdiFilmSemiExtractor.invokeKisskh
 import com.michat88.AdiFilmSemiExtractor.invokeVidlink
-import com.michat88.AdiFilmSemiExtractor.invokeVidsrc
-import com.michat88.AdiFilmSemiExtractor.invokeVidsrccc
-import com.michat88.AdiFilmSemiExtractor.invokeVixsrc
-import com.michat88.AdiFilmSemiExtractor.invokeWatchsomuch
-import com.michat88.AdiFilmSemiExtractor.invokeWyzie
-import com.michat88.AdiFilmSemiExtractor.invokeXprime
-import com.michat88.AdiFilmSemiExtractor.invokeCinemaOS
-import com.michat88.AdiFilmSemiExtractor.invokePlayer4U
-import com.michat88.AdiFilmSemiExtractor.invokeRiveStream
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.metaproviders.TmdbProvider
@@ -55,24 +40,8 @@ open class AdiFilmSemi : TmdbProvider() {
 
         private const val apiKey = "b030404650f279792a8d3287232358e3"
 
-        /** ALL SOURCES */
-        const val gomoviesAPI = "https://gomovies-online.cam"
-        const val idlixAPI = "https://tv10.idlixku.com" 
-        const val vidsrcccAPI = "https://vidsrc.cc"
-        const val vidSrcAPI = "https://vidsrc.net"
-        const val xprimeAPI = "https://backend.xprime.tv"
-        const val watchSomuchAPI = "https://watchsomuch.tv"
-        const val mappleAPI = "https://mapple.uk"
+        /** SUMBER AKTIF (Adicinemax21) */
         const val vidlinkAPI = "https://vidlink.pro"
-        const val vidfastAPI = "https://vidfast.pro"
-        const val wyzieAPI = "https://sub.wyzie.ru"
-        const val vixsrcAPI = "https://vixsrc.to"
-        const val vidsrccxAPI = "https://vidsrc.cx"
-        const val superembedAPI = "https://multiembed.mov"
-        const val vidrockAPI = "https://vidrock.net"
-        const val cinemaOSApi = "https://cinemaos.tech"
-        const val Player4uApi = "https://player4u.xyz"
-        const val RiveStreamAPI = "https://rivestream.org"
 
         fun getType(t: String?): TvType = when (t) {
             "movie" -> TvType.Movie
@@ -239,6 +208,10 @@ open class AdiFilmSemi : TmdbProvider() {
             ?.map { "https://www.youtube.com/watch?v=${it.key}" }
             ?.take(1)
 
+        // [Tambah] altTitle = judul Indonesia dari TMDB (untuk fallback search di Adicinemax21 extractors)
+        val idTitle = res.alternativeTitles?.results?.find { it.iso31661 == "ID" }?.title
+        val jpTitle = res.alternativeTitles?.results?.find { it.iso31661 == "JP" }?.title
+
         return if (type == TvType.TvSeries) {
             val lastSeason = res.lastEpisodeToAir?.seasonNumber
             val episodes = res.seasons?.mapNotNull { season ->
@@ -255,11 +228,12 @@ open class AdiFilmSemi : TmdbProvider() {
                                 title = title,
                                 year = season.airDate?.split("-")?.first()?.toIntOrNull(),
                                 orgTitle = orgTitle,
+                                altTitle = idTitle,
                                 isAnime = isAnime,
                                 airedYear = year,
                                 lastSeason = lastSeason,
                                 epsTitle = eps.name,
-                                jpTitle = res.alternativeTitles?.results?.find { it.iso31661 == "JP" }?.title,
+                                jpTitle = jpTitle,
                                 date = season.airDate,
                                 airedDate = res.releaseDate
                                     ?: res.firstAirDate,
@@ -313,8 +287,9 @@ open class AdiFilmSemi : TmdbProvider() {
                     title = title,
                     year = year,
                     orgTitle = orgTitle,
+                    altTitle = idTitle,
                     isAnime = isAnime,
-                    jpTitle = res.alternativeTitles?.results?.find { it.iso31661 == "JP" }?.title,
+                    jpTitle = jpTitle,
                     airedDate = res.releaseDate
                         ?: res.firstAirDate,
                     isAsian = isAsian,
@@ -350,28 +325,10 @@ open class AdiFilmSemi : TmdbProvider() {
 
         runAllAsync(
             {
-                invokeIdlix(
-                    res.title,
-                    res.year,
-                    res.season,
-                    res.episode,
-                    subtitleCallback,
-                    callback
-                )
-            },
-            {
                 invokeAdimoviebox2(
                     res.title ?: return@runAllAsync,
-                    res.year,
-                    res.season,
-                    res.episode,
-                    subtitleCallback,
-                    callback
-                )
-            },
-            {
-                invokeAdiDewasa(
-                    res.title ?: return@runAllAsync,
+                    res.orgTitle,
+                    res.altTitle,
                     res.year,
                     res.season,
                     res.episode,
@@ -382,6 +339,8 @@ open class AdiFilmSemi : TmdbProvider() {
             {
                 invokeKisskh(
                     res.title ?: return@runAllAsync,
+                    res.orgTitle,
+                    res.altTitle,
                     res.year,
                     res.season,
                     res.episode,
@@ -392,6 +351,8 @@ open class AdiFilmSemi : TmdbProvider() {
             {
                 invokeAdimoviebox(
                     res.title ?: return@runAllAsync,
+                    res.orgTitle,
+                    res.altTitle,
                     res.year,
                     res.season,
                     res.episode,
@@ -401,84 +362,13 @@ open class AdiFilmSemi : TmdbProvider() {
             },
             {
                 invokeVidlink(res.id, res.season, res.episode, callback)
-            },
-            {
-                invokeVidsrccc(
-                    res.id,
-                    res.imdbId,
-                    res.season,
-                    res.episode,
-                    subtitleCallback,
-                    callback
-                )
-            },
-            {
-                invokeVixsrc(res.id, res.season, res.episode, callback)
-            },
-            {
-                invokeCinemaOS(
-                    res.imdbId,
-                    res.id,
-                    res.title,
-                    res.season,
-                    res.episode,
-                    res.year,
-                    callback,
-                    subtitleCallback
-                )
-            },
-            {
-                if (!res.isAnime) invokePlayer4U(
-                    res.title,
-                    res.season,
-                    res.episode,
-                    res.year,
-                    callback
-                )
-            },
-            {
-                if (!res.isAnime) invokeRiveStream(res.id, res.season, res.episode, callback)
-            },
-            {
-                invokeVidsrc(
-                    res.imdbId,
-                    res.season,
-                    res.episode,
-                    subtitleCallback,
-                    callback
-                )
-            },
-            {
-                invokeWatchsomuch(
-                    res.imdbId,
-                    res.season,
-                    res.episode,
-                    subtitleCallback
-                )
-            },
-            {
-                invokeVidfast(res.id, res.season, res.episode, subtitleCallback, callback)
-            },
-            {
-                invokeMapple(res.id, res.season, res.episode, subtitleCallback, callback)
-            },
-            {
-                invokeWyzie(res.id, res.season, res.episode, subtitleCallback)
-            },
-            {
-                invokeSuperembed(
-                    res.id,
-                    res.season,
-                    res.episode,
-                    subtitleCallback,
-                    callback
-                )
             }
         )
 
         return true
     }
 
+    // [Modifikasi] Tambah orgTitle & altTitle (dipakai extractor Adicinemax21 untuk fallback search)
     data class LinkData(
         val id: Int? = null,
         val imdbId: String? = null,
@@ -491,6 +381,7 @@ open class AdiFilmSemi : TmdbProvider() {
         val title: String? = null,
         val year: Int? = null,
         val orgTitle: String? = null,
+        val altTitle: String? = null,
         val isAnime: Boolean = false,
         val airedYear: Int? = null,
         val lastSeason: Int? = null,
