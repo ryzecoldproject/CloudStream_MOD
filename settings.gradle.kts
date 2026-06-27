@@ -1,32 +1,14 @@
-pluginManagement {
-    repositories {
-        google()
-        mavenCentral()
-        maven("https://jitpack.io")
-        gradlePluginPortal()
-    }
-}
-
-dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-    repositories {
-        google()
-        mavenCentral()
-        maven("https://jitpack.io")
-    }
-}
-
 rootProject.name = "CloudstreamPlugins"
 
-// Auto-include every directory that has its own build.gradle.kts.
-// Add a directory name here to opt it out.
+// This file sets what projects are included. All new projects should get automatically included unless specified in "disabled" variable.
 val disabled = listOf<String>()
 
-rootDir.eachDir { dir ->
+File(rootDir, ".").eachDir { dir ->
     if (!disabled.contains(dir.name) && File(dir, "build.gradle.kts").exists()) {
         include(dir.name)
     }
 }
+
 
 fun File.eachDir(block: (File) -> Unit) {
     listFiles()?.filter { it.isDirectory }?.forEach { block(it) }
