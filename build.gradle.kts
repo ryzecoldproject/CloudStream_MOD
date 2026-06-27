@@ -32,6 +32,8 @@ fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) = extens
 fun Project.android(configuration: LibraryExtension.() -> Unit) {
     extensions.getByName<LibraryExtension>("android").apply {
         project.extensions.findByType(JavaPluginExtension::class.java)?.apply {
+            // Use Java 17 toolchain even if a higher JDK runs the build.
+            // We still use Java 8 for now which higher JDKs have deprecated.
             toolchain {
                 languageVersion.set(JavaLanguageVersion.of(17))
             }
@@ -46,12 +48,12 @@ subprojects {
     apply(plugin = "com.lagradost.cloudstream3.gradle")
 
     cloudstream {
-        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "https://github.com/trinityzanetamanu-code/Premium_RepoX")
-        authors = listOf("trinityzanetamanu")
+        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "https://github.com/phisher98/cloudstream-extensions-phisher")
+        authors = listOf("Phisher98")
     }
 
     android {
-        namespace = "com.trinityzanetamanu"
+        namespace = "com.phisher98"
         compileSdk = 36
 
         defaultConfig {
@@ -84,9 +86,6 @@ subprojects {
         val implementation by configurations
         val cloudstream by configurations
         cloudstream("com.lagradost:cloudstream3:pre-release")
-
-        // Fix for Kotlin 2.4.0 strict type annotation checking
-        implementation("org.jspecify:jspecify:1.0.0")
 
         // Other dependencies
         implementation(kotlin("stdlib"))
