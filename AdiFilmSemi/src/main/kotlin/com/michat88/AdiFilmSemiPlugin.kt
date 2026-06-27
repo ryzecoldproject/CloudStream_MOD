@@ -7,11 +7,7 @@ import android.content.Context
 @CloudstreamPlugin
 class AdiFilmSemiPlugin : Plugin() {
     override fun load(context: Context) {
-        // Register Main Provider
+        // Register Main Provider saja, tanpa extractor Jeniusplay.
         registerMainAPI(AdiFilmSemi())
-        
-        // Register Extractors
-        // Mendaftarkan Jeniusplay yang baru (dari IdlixProvider)
-        registerExtractorAPI(Jeniusplay())
     }
 }
