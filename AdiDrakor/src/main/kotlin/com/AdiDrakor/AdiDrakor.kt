@@ -48,15 +48,15 @@ open class AdiDrakor : TmdbProvider() {
     }
 
     override val mainPage = mainPageOf(
-        "$tmdbAPI/discover/tv?api_key=$apiKey&with_original_language=ko&sort_by=first_air_date.desc&without_genres=16" to "Drama Korea Terbaru",
-        "$tmdbAPI/discover/movie?api_key=$apiKey&with_original_language=ko&sort_by=primary_release_date.desc&without_genres=16" to "Movie Korea Terbaru",
-        "$tmdbAPI/discover/tv?api_key=$apiKey&with_original_language=ko&sort_by=popularity.desc&without_genres=16" to "Popular K-Dramas",
-        "$tmdbAPI/discover/movie?api_key=$apiKey&with_original_language=ko&sort_by=popularity.desc&without_genres=16" to "Popular Korean Movies",
+        "$tmdbAPI/discover/tv?api_key=$apiKey&with_original_language=ko&sort_by=first_air_date.desc&without_genres=16&vote_count.gte=1" to "Drama Korea Terbaru",
+        "$tmdbAPI/discover/movie?api_key=$apiKey&with_original_language=ko&sort_by=primary_release_date.desc&without_genres=16&vote_count.gte=1" to "Movie Korea Terbaru",
+        "$tmdbAPI/discover/tv?api_key=$apiKey&with_original_language=ko&sort_by=popularity.desc&without_genres=16&vote_count.gte=1" to "Popular K-Dramas",
+        "$tmdbAPI/discover/movie?api_key=$apiKey&with_original_language=ko&sort_by=popularity.desc&without_genres=16&vote_count.gte=1" to "Popular Korean Movies",
         "$tmdbAPI/discover/tv?api_key=$apiKey&with_original_language=ko&sort_by=vote_average.desc&vote_count.gte=100&without_genres=16" to "Top Rated K-Dramas",
         "$tmdbAPI/discover/movie?api_key=$apiKey&with_original_language=ko&sort_by=vote_average.desc&vote_count.gte=100&without_genres=16" to "Top Rated Korean Movies",
-        "$tmdbAPI/discover/tv?api_key=$apiKey&with_original_language=ko&with_genres=10749&without_genres=16" to "Romance K-Dramas",
-        "$tmdbAPI/discover/movie?api_key=$apiKey&with_original_language=ko&with_genres=28&without_genres=16" to "Action Korean Movies",
-        "$tmdbAPI/discover/tv?api_key=$apiKey&with_original_language=ko&with_genres=18&without_genres=16" to "Drama K-Dramas",
+        "$tmdbAPI/discover/tv?api_key=$apiKey&with_original_language=ko&with_genres=10749&without_genres=16&vote_count.gte=1" to "Romance K-Dramas",
+        "$tmdbAPI/discover/movie?api_key=$apiKey&with_original_language=ko&with_genres=28&without_genres=16&vote_count.gte=1" to "Action Korean Movies",
+        "$tmdbAPI/discover/tv?api_key=$apiKey&with_original_language=ko&with_genres=18&without_genres=16&vote_count.gte=1" to "Drama K-Dramas",
     )
 
     private fun getImageUrl(link: String?): String? {
@@ -82,6 +82,8 @@ open class AdiDrakor : TmdbProvider() {
     }
 
     private fun Media.toSearchResponse(type: String? = null): SearchResponse? {
+        // Sembunyikan konten yang belum memiliki rating (vote_average null atau 0)
+        if ((voteAverage ?: 0.0) == 0.0) return null
         return newMovieSearchResponse(
             title ?: name ?: originalTitle ?: return null,
             Data(id = id, type = mediaType ?: type).toJson(),
@@ -96,7 +98,10 @@ open class AdiDrakor : TmdbProvider() {
 
     override suspend fun search(query: String): List<SearchResponse>? {
         return app.get("$tmdbAPI/search/multi?api_key=$apiKey&language=en-US&query=$query&page=1&include_adult=${settingsForProvider.enableAdult}")
-            .parsedSafe<Results>()?.results?.mapNotNull { media ->
+            .parsedSafe<Results>()?.results
+            // Filter konten tanpa rating dari hasil pencarian
+            ?.filter { (it.voteAverage ?: 0.0) > 0.0 }
+            ?.mapNotNull { media ->
                 media.toSearchResponse()
             }
     }
