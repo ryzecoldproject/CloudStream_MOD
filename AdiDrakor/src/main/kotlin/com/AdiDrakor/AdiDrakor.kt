@@ -82,8 +82,9 @@ open class AdiDrakor : TmdbProvider() {
     }
 
     private fun Media.toSearchResponse(type: String? = null): SearchResponse? {
-        // Sembunyikan konten yang belum memiliki rating (vote_average null atau 0)
-        if ((voteAverage ?: 0.0) == 0.0) return null
+        // FILTER BARU: Abaikan item jika poster kosong/null, atau rating null/0.0
+        if (posterPath.isNullOrBlank() || voteAverage == null || voteAverage == 0.0) return null
+        
         return newMovieSearchResponse(
             title ?: name ?: originalTitle ?: return null,
             Data(id = id, type = mediaType ?: type).toJson(),
@@ -99,8 +100,8 @@ open class AdiDrakor : TmdbProvider() {
     override suspend fun search(query: String): List<SearchResponse>? {
         return app.get("$tmdbAPI/search/multi?api_key=$apiKey&language=en-US&query=$query&page=1&include_adult=${settingsForProvider.enableAdult}")
             .parsedSafe<Results>()?.results
-            // Filter konten tanpa rating dari hasil pencarian
-            ?.filter { (it.voteAverage ?: 0.0) > 0.0 }
+            // FILTER BARU: Pastikan hasil pencarian juga menyaring konten tanpa poster & tanpa rating
+            ?.filter { !it.posterPath.isNullOrBlank() && it.voteAverage != null && it.voteAverage > 0.0 }
             ?.mapNotNull { media ->
                 media.toSearchResponse()
             }
