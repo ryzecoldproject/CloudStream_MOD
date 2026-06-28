@@ -1,4 +1,4 @@
-package com.AdiDrako
+package com.AdiDrakor
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
