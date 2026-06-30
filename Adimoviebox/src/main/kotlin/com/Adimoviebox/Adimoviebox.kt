@@ -11,10 +11,8 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 
 class Adimoviebox : MainAPI() {
-    // UPDATED: Main URL baru menggunakan moviebox.ph
     override var mainUrl = "https://moviebox.ph"
     
-    // UPDATED: Menggunakan satu Base API URL yang terpusat
     private val apiBaseUrl = "https://h5-api.aoneroom.com/wefeed-h5api-bff"
 
     override val instantLinkLoading = true
@@ -32,7 +30,6 @@ class Adimoviebox : MainAPI() {
     // TOKEN OTENTIKASI (Berlaku hingga Juli 2026)
     private val bearerToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjY1NDQ3MzA2NDM5NjQ1MTYyMzIsImF0cCI6MywiZXh0IjoiMTc4MjUzNTQwMiIsImV4cCI6MTc5MDMxMTQwMiwiaWF0IjoxNzgyNTM1MTAyfQ.d2WpLFeF0erMdSlaaM1RMgnpyB4j1R1s2xVcY6a2Ut8"
 
-    // Header disempurnakan dengan otorisasi Bearer Token
     private val commonHeaders = mapOf(
         "origin" to mainUrl,
         "referer" to "$mainUrl/",
@@ -41,7 +38,6 @@ class Adimoviebox : MainAPI() {
         "authorization" to "Bearer $bearerToken"
     )
 
-    // --- BAGIAN KATEGORI LENGKAP ---
     override val mainPage: List<MainPageData> = mainPageOf(
         "5283462032510044280" to "Indonesian Drama",
         "6528093688173053896" to "Indonesian Movies",
@@ -179,49 +175,63 @@ class Adimoviebox : MainAPI() {
         }
     }
 
+    // UPDATED: Penyesuaian total alur ekstraksi video & subtitle berdasarkan data cURL terbaru
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-
         val media = parseJson<LoadData>(data)
         
-        val referer = "$mainUrl/spa/videoPlayPage/movies/${media.detailPath}?id=${media.id}&type=/movie/detail&lang=en"
-        val specificHeaders = commonHeaders + ("referer" to referer)
+        // 1. Alur Pemutaran Video (Beralih ke endpoint netfilm.world menggunakan otorisasi Cookie)
+        val playUrl = "https://netfilm.world/wefeed-h5api-bff/subject/play?subjectId=${media.id}&se=${media.season ?: 0}&ep=${media.episode ?: 0}&detailPath=${media.detailPath}"
+        val playHeaders = mapOf(
+            "authority" to "netfilm.world",
+            "accept" to "application/json",
+            "referer" to "https://netfilm.world/spa/videoPlayPage/movies/${media.detailPath}?id=${media.id}&detailSe=&detailEp=&lang=en&type=/movie/detail",
+            "user-agent" to USER_AGENT,
+            "x-client-info" to "{\"timezone\":\"Asia/Jakarta\"}",
+            "cookie" to "mb_token=\"$bearerToken\""
+        )
 
-        val streams = app.get(
-            "$apiBaseUrl/subject/play?subjectId=${media.id}&se=${media.season ?: 0}&ep=${media.episode ?: 0}&detailPath=${media.detailPath}",
-            headers = specificHeaders
-        ).parsedSafe<Media>()?.data?.streams
+        val streamsResponse = app.get(playUrl, headers = playHeaders).parsedSafe<Media>()
+        val streams = streamsResponse?.data?.streams
 
-        streams?.reversed()?.distinctBy { it.url }?.map { source ->
+        streams?.reversed()?.distinctBy { it.url }?.forEach { source ->
             callback.invoke(
                 newExtractorLink(
-                    this.name,
-                    this.name,
-                    source.url ?: return@map,
-                    INFER_TYPE
+                    source = this.name,
+                    name = "${this.name} - ${source.resolutions}p",
+                    url = source.url ?: return@forEach,
+                    type = INFER_TYPE
                 ) {
-                    this.referer = mainUrl
+                    this.referer = "https://netfilm.world/"
                     this.quality = getQualityFromName(source.resolutions)
                 }
             )
         }
 
-        val id = streams?.firstOrNull()?.id
-        val format = streams?.firstOrNull()?.format
+        // 2. Alur Pembuatan Caption / Subtitle (Melengkapi parameter detailPath terbaru)
+        val firstStream = streams?.firstOrNull()
+        val id = firstStream?.id
+        val format = firstStream?.format
 
         if (id != null && format != null) {
-            app.get(
-                "$apiBaseUrl/subject/caption?format=$format&id=$id&subjectId=${media.id}",
-                headers = specificHeaders
-            ).parsedSafe<Media>()?.data?.captions?.map { subtitle ->
+            val captionUrl = "$apiBaseUrl/subject/caption?format=$format&id=$id&subjectId=${media.id}&detailPath=${media.detailPath}"
+            val captionHeaders = mapOf(
+                "authority" to "h5-api.aoneroom.com",
+                "accept" to "application/json",
+                "referer" to "https://netfilm.world/",
+                "user-agent" to USER_AGENT,
+                "x-client-info" to "{\"timezone\":\"Asia/Jakarta\"}"
+            )
+
+            app.get(captionUrl, headers = captionHeaders).parsedSafe<Media>()?.data?.captions?.forEach { subtitle ->
                 subtitleCallback.invoke(
                     newSubtitleFile(
                         subtitle.lanName ?: "",
-                        subtitle.url ?: return@map
+                        subtitle.url ?: return@forEach
                     )
                 )
             }
