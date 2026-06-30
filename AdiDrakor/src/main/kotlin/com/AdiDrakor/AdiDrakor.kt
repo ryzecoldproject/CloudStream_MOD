@@ -5,6 +5,7 @@ import com.AdiDrakor.AdiDrakorExtractor.invokeKisskh
 import com.AdiDrakor.AdiDrakorExtractor.invokeAdimoviebox
 import com.AdiDrakor.AdiDrakorExtractor.invokeAdimoviebox2
 import com.AdiDrakor.AdiDrakorExtractor.invokeVidlink
+import com.AdiDrakor.AdiDrakorExtractor.invokeIdlix
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.metaproviders.TmdbProvider
@@ -33,7 +34,6 @@ open class AdiDrakor : TmdbProvider() {
         private const val tmdbAPI = "https://api.themoviedb.org/3"
         private const val apiKey = "422bcadf9cfb5ff5b6951cef66b4a0b6"
 
-        /** Endpoint Vidlink — diakses oleh AdiDrakorExtractor.invokeVidlink */
         const val vidlinkAPI = "https://vidlink.pro"
 
         fun getType(t: String?): TvType = when (t) {
@@ -82,7 +82,6 @@ open class AdiDrakor : TmdbProvider() {
     }
 
     private fun Media.toSearchResponse(type: String? = null): SearchResponse? {
-        // FILTER BARU: Abaikan item jika poster kosong/null, atau rating null/0.0
         if (posterPath.isNullOrBlank() || voteAverage == null || voteAverage == 0.0) return null
         
         return newMovieSearchResponse(
@@ -100,7 +99,6 @@ open class AdiDrakor : TmdbProvider() {
     override suspend fun search(query: String): List<SearchResponse>? {
         return app.get("$tmdbAPI/search/multi?api_key=$apiKey&language=en-US&query=$query&page=1&include_adult=${settingsForProvider.enableAdult}")
             .parsedSafe<Results>()?.results
-            // FILTER BARU: Pastikan hasil pencarian juga menyaring konten tanpa poster & tanpa rating
             ?.filter { !it.posterPath.isNullOrBlank() && it.voteAverage != null && it.voteAverage > 0.0 }
             ?.mapNotNull { media ->
                 media.toSearchResponse()
@@ -283,6 +281,7 @@ open class AdiDrakor : TmdbProvider() {
     ): Boolean {
         val res = parseJson<LinkData>(data)
         runAllAsync(
+            { invokeIdlix(res.title ?: return@runAllAsync, res.orgTitle, res.altTitle, res.year, res.season, res.episode, subtitleCallback, callback) },
             { invokeAdimoviebox2(res.title ?: return@runAllAsync, res.orgTitle, res.altTitle, res.year, res.season, res.episode, subtitleCallback, callback) },
             { invokeKisskh(res.title ?: return@runAllAsync, res.orgTitle, res.altTitle, res.year, res.season, res.episode, subtitleCallback, callback) },
             { invokeAdimoviebox(res.title ?: return@runAllAsync, res.orgTitle, res.altTitle, res.year, res.season, res.episode, subtitleCallback, callback) },
