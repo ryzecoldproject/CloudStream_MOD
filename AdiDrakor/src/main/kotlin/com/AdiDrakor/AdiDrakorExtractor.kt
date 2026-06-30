@@ -81,7 +81,7 @@ object AdiDrakorExtractor {
     private data class KisskhSources(@JsonProperty("Video") val video: String?, @JsonProperty("ThirdParty") val thirdParty: String?)
     private data class KisskhSubtitle(@JsonProperty("src") val src: String?, @JsonProperty("label") val label: String?)
 
-    // ================== ADIMOVIEBOX (V1) SOURCE (UPDATED VERSION) ==================
+    // ================== ADIMOVIEBOX (V1) SOURCE (FIXED VERSION) ==================
     suspend fun invokeAdimoviebox(
         title: String,
         orgTitle: String? = null,
@@ -111,9 +111,16 @@ object AdiDrakorExtractor {
             return items.find { item ->
                 val itemYear = item.releaseDate?.split("-")?.firstOrNull()?.toIntOrNull()
                 val cleanItemTitle = item.title?.replace(Regex("[^A-Za-z0-9]"), "")?.lowercase() ?: ""
+                
+                // FIXED: Penyesuaian pengecekan tahun rilis terikat multi-season TV Series
+                val isYearMatch = if (season != null && season > 0) {
+                    itemYear == null || year == null || itemYear <= year
+                } else {
+                    year == null || itemYear == null || Math.abs(itemYear - year) <= 1
+                }
+
                 cleanItemTitle.isNotEmpty() && cleanQuery.isNotEmpty() &&
-                (cleanItemTitle == cleanQuery || (cleanItemTitle.contains(cleanQuery) &&
-                    (year == null || itemYear == null || Math.abs(itemYear - year) <= 1)))
+                (cleanItemTitle.contains(cleanQuery) || cleanQuery.contains(cleanItemTitle)) && isYearMatch
             }
         }
 
@@ -126,7 +133,7 @@ object AdiDrakorExtractor {
         val detailPath = matchedMedia.detailPath ?: subjectId
         val se = season ?: 0
         val ep = episode ?: 0
-        
+
         // 1. Alur Pemutaran Video Baru (Beralih ke endpoint netfilm.world dengan otorisasi Cookie)
         val playUrl = "https://netfilm.world/wefeed-h5api-bff/subject/play?subjectId=$subjectId&se=$se&ep=$ep&detailPath=$detailPath"
         val playHeaders = mapOf(
@@ -140,14 +147,14 @@ object AdiDrakorExtractor {
 
         val playRes = app.get(playUrl, headers = playHeaders).text
         val streams = tryParseJson<AdimovieboxResponse>(playRes)?.data?.streams ?: return
-        
+
         streams.reversed().distinctBy { it.url }.forEach { source ->
              callback.invoke(newExtractorLink("Adimoviebox", "Adimoviebox ${source.resolutions ?: "?"}p", source.url ?: return@forEach, INFER_TYPE) {
                     this.referer = "https://netfilm.world/"
                     this.quality = getQualityFromName(source.resolutions)
              })
         }
-     
+
         // 2. Alur Pembuatan Caption / Subtitle Baru (Melengkapi parameter detailPath & captionHeaders terbaru)
         val firstStream = streams.firstOrNull()
         val id = firstStream?.id
