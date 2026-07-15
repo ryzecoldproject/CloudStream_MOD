@@ -15,7 +15,7 @@ import javax.crypto.spec.SecretKeySpec
 
 class Strp2p : ExtractorApi() {
     override val name            = "Strp2p"
-    override val mainUrl         = "https://klikxxi.strp2p.site"
+    override val mainUrl         = "klikxxi.shop"
     override val requiresReferer = true
 
     private val AES_KEY = "kiemtienmua911ca"
