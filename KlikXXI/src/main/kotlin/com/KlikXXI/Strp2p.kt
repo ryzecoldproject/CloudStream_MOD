@@ -10,11 +10,11 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 
 class Strp2p : ExtractorApi() {
-    override val name            = "KlikXXI Regex Stream Unpacker"
+    override val name            = "KlikXXI Vite SPA Unpacker"
     override val mainUrl         = "https://klikxxi.shop"
     override val requiresReferer = true
 
-    private val TAG = "Strp2p_Regex_Core"
+    private val TAG = "Strp2p_SPA_Core"
 
     override suspend fun getUrl(
         url: String,
@@ -22,43 +22,39 @@ class Strp2p : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        Log.d(TAG, "══════════ PILOT EKSTRAKSI STRIP REGEX START ══════════")
+        Log.d(TAG, "══════════ PILOT EKSTRAKSI SPA STRP2P START ══════════")
+        val baseDomain = Regex("""^(https?://[^/#?]+)""").find(url)?.groupValues?.get(1) ?: "https://klikxxi.strp2p.site"
         
-        // 1. Ambil muatan dokumen HTML dari simpul rute pemutar
+        // 1. Ambil shell HTML awal dari URL Iframe
         val htmlContent = fetchPage(url)
         if (htmlContent.isBlank()) {
-            Log.e(TAG, "[-] Halaman pemutar kosong atau gagal diakses.")
+            Log.e(TAG, "[-] Halaman shell HTML kosong atau gagal diakses.")
             return
         }
 
-        // 2. Isolasi skrip player terkompresi / objek konfigurasi internal
-        val packedScript = extractPlayerScript(htmlContent)
+        // 2. Ekstrak dan unduh isi kode dari bundle JavaScript utama Vite secara statis
+        val jsContent = extractPlayerScript(htmlContent, baseDomain)
         
-        // Gabungkan konteks pencarian: Utamakan hasil unpacker skrip, gunakan dokumen utuh sebagai fallback
-        val searchContext = packedScript.ifEmpty { htmlContent }
+        // Gabungkan konteks pencarian: jika download JS gagal, gunakan HTML sebagai fallback
+        val searchContext = jsContent.ifEmpty { htmlContent }
 
-        // 3. Bongkar manifes HLS stream (.m3u8) dari objek text
+        // 3. Bongkar manifes HLS stream (.m3u8) dari teks kode
         val rawCandidates = extractM3u8Urls(searchContext)
-        Log.d(TAG, "[+] Menemukan sebanyak ${rawCandidates.size} kandidat URL potensial dari dokumen.")
+        Log.d(TAG, "[+] Menemukan sebanyak ${rawCandidates.size} kandidat URL potensial.")
 
-        // 4. Lakukan validasi, perbaikan skema, dan eliminasi duplikasi
+        // 4. Lakukan validasi skema dan buang duplikasi data
         val tervalidasi = rawCandidates.mapNotNull { candidate ->
             validateCandidate(candidate, url)
         }.distinct()
 
-        Log.d(TAG, "[+] Total tautan lolos verifikasi filter duplikasi: ${tervalidasi.size}")
-
         // 5. Daftarkan tautan video manifest yang valid langsung ke basis sistem Cloudstream
         tervalidasi.forEach { streamUrl ->
             val authParams = extractAuthParameters(streamUrl)
-            
-            // Penentuan kualitas video biner berbasis penanda kluster manifest (hls4 = 1080p, else 720p)
             val qualityLabel = if (streamUrl.contains("hls4")) Qualities.P1080.value else Qualities.P720.value
-            val currentServerName = if (streamUrl.contains("brightcrest")) "Server Premium (Brightcrest)" else "Server Standar"
+            val currentServerName = if (streamUrl.contains("brightcrest")) "Strp2p Premium" else "Strp2p Standar"
 
-            Log.d(TAG, "[+] Sukses mengunci aliran video hulu: $streamUrl | Token Params: $authParams")
+            Log.d(TAG, "[+] Sukses mengunci aliran video hulu: $streamUrl")
             
-            // FIX: Properti referer, quality, dan headers dimasukkan ke dalam lambda block closure sesuai arsitektur Cloudstream utils
             callback(newExtractorLink(
                 source = this.name,
                 name = currentServerName,
@@ -70,14 +66,13 @@ class Strp2p : ExtractorApi() {
                 this.headers = buildHeaders(url)
             })
         }
-        Log.d(TAG, "══════════ PILOT EKSTRAKSI STRIP REGEX END ══════════")
+        Log.d(TAG, "══════════ PILOT EKSTRAKSI SPA STRP2P END ══════════")
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  LOGIKA PENCARIAN & PEMBONGKARAN ARTEFAK (PIPELINE SEPARATED)
+    //  PIPELINE LOGIC IMPLEMENTATION
     // ─────────────────────────────────────────────────────────────────────────
 
-    // FIX: Ditambahkan modifier 'suspend' karena memanggil app.get() yang asinkron
     suspend fun fetchPage(url: String): String {
         return try {
             Log.d(TAG, "[+] Membuka sambungan HTTP GET ke: $url")
@@ -89,40 +84,47 @@ class Strp2p : ExtractorApi() {
         }
     }
 
-    fun extractPlayerScript(html: String): String {
-        Log.d(TAG, "[+] Mencari struktur kompresi Dean Edwards (Packer)...")
+    suspend fun extractPlayerScript(html: String, baseDomain: String): String {
+        Log.d(TAG, "[+] Mendeteksi aset JavaScript utama dari bundler Vite...")
         
-        // Regex penangkap fungsi evaluasi Packer secara utuh berdasarkan struktur parameter tanda tangan p,a,c,k,e,d
-        val packerRegex = Regex("""eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\).*?\}\s*\(\s*.*?\s*,\s*\d+\s*,\s*\d+\s*,\s*['"](.*?)['"]\s*\.\s*split\s*\(\s*['"]\|['"]\s*\)\s*\)\s*\)""", RegexOption.DOT_MATCHES_ALL)
-        val match = packerRegex.find(html)
+        // Regex untuk menangkap jalur file index-xxx.js dari struktur script type="module"
+        val viteJsRegex = Regex("""src=["'](/assets/index-[A-Za-z0-9_-]+\.js)["']""")
+        val match = viteJsRegex.find(html)
         
         if (match != null) {
-            val dictionaryString = match.groupValues[1]
-            Log.d(TAG, "[+] Berhasil mengamankan blok kamus kata Packer.")
-            return unpackPackerData(dictionaryString)
+            val relativeJsPath = match.groupValues[1]
+            val absoluteJsUrl = "$baseDomain$relativeJsPath"
+            Log.d(TAG, "[+] Aset JS Ditemukan: $absoluteJsUrl. Mengunduh kode mentah secara statis...")
+            
+            return try {
+                app.get(absoluteJsUrl, headers = buildHeaders(baseDomain)).text
+            } catch (e: Exception) {
+                Log.e(TAG, "[-] Gagal mengunduh file berkas JS: ${e.message}")
+                ""
+            }
         }
-        Log.w(TAG, "[-] Skrip Packer tidak terdeteksi pada DOM dokumen html ini.")
+        Log.w(TAG, "[-] Tidak dapat menemukan aset kompilasi berkas index.js milik Vite di DOM HTML.")
         return ""
     }
 
     fun extractM3u8Urls(script: String): List<String> {
-        Log.d(TAG, "[+] Memulai pemindaian pola string literal manifest stream...")
+        Log.d(TAG, "[+] Memindai pola teks manifest stream di dalam kode...")
         val candidates = mutableListOf<String>()
         
-        // Regex menangkap string literal yang membawa alamat biner manifest .m3u8 absolut maupun relatif
+        // Regex menangkap string literal .m3u8 absolut maupun relatif
         val m3u8Pattern = Regex("""["']((?:https?://[^"']+|/[^"']+)\.m3u8(?:\?[^"']+)?)["']""")
         val matches = m3u8Pattern.findAll(script)
         
         for (match in matches) {
             candidates.add(match.groupValues[1])
         }
+        
+        // NOT VERIFIED: Jika JS menggunakan teknik penyusunan string terpisah (string concatenation), regex literal di atas akan menghasilkan list kosong.
         return candidates
     }
 
     fun extractAuthParameters(url: String): Map<String, String> {
         val paramMap = mutableMapOf<String, String>()
-        
-        // Regex menangkap token otentikasi pertahanan hulu (parameter t, s, dan e)
         val authPattern = Regex("""[?&](t|s|e)=([^&#"']+)""")
         val matches = authPattern.findAll(url)
         
@@ -133,51 +135,31 @@ class Strp2p : ExtractorApi() {
     }
 
     fun validateCandidate(url: String, parentUrl: String): String? {
-        // Pembuangan manifest eksternal Google Tag Manager yang tidak sengaja terjaring oleh regex mesin
         if (url.contains("googletagmanager") || url.contains("google-analytics")) {
             return null
         }
 
-        var cleanUrl = url.replace("\\/", "/") // Bersihkan escape karakter bawaan JSON format jika ada
+        var cleanUrl = url.replace("\\/", "/") 
 
-        // Transformasi skema protokol palsu '1d://' hasil obfuskasi player menjadi skema web 'https://'
         if (cleanUrl.startsWith("1d://")) {
             cleanUrl = cleanUrl.replace("1d://", "https://")
         }
 
-        // Penanganan Rute Jalur URL Relatif
         if (cleanUrl.startsWith("/")) {
-            val baseDomain = Regex("""^(https?://[^/#?]+)""").find(parentUrl)?.groupValues?.get(1) ?: mainUrl
+            val baseDomain = Regex("""^(https?://[^/#?]+)""").find(parentUrl)?.groupValues?.get(1) ?: "https://klikxxi.strp2p.site"
             cleanUrl = "$baseDomain$cleanUrl"
         }
 
-        // NOT VERIFIED: Format ekstensi akhir. Jika hulu merubah struktur penamaan manifest, validasi ini harus diperiksa kembali.
         return if (cleanUrl.contains(".m3u8")) cleanUrl else null
     }
 
     fun buildHeaders(currentUrl: String): Map<String, String> {
-        val baseDomain = Regex("""^(https?://[^/#?]+)""").find(currentUrl)?.groupValues?.get(1) ?: mainUrl
+        val baseDomain = Regex("""^(https?://[^/#?]+)""").find(currentUrl)?.groupValues?.get(1) ?: "https://klikxxi.strp2p.site"
         return mapOf(
-            "User-Agent" to "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36",
-            "Referer" to "$baseDomain/",
+            "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36",
+            "Referer" to "https://klikxxi.shop/",
             "Origin" to baseDomain,
-            "Accept-Language" to "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7"
+            "Accept" to "*/*"
         )
-    }
-
-    /**
-     * Algoritma Rekonstruksi Kamus Packer Mandiri
-     * Mengamankan data tanpa perlu menggunakan runtime JS engine / WebView.
-     */
-    private fun unpackPackerData(dictionaryStr: String): String {
-        return try {
-            val words = dictionaryStr.split("|")
-            Log.d(TAG, "[+] Melakukan de-kompresi string lookup tabel. Jumlah kata: ${words.size}")
-            // Satukan seluruh bagian kamus kata untuk meloloskan domain asli dari jeratan obfuskasi string packer
-            words.joinToString(separator = " ")
-        } catch (e: Exception) {
-            Log.e(TAG, "[-] Gagal mengurai isi tabel kamus Packer: ${e.message}")
-            ""
-        }
     }
 }
