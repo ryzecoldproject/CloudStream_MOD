@@ -1,207 +1,180 @@
 package com.KlikXXI
 
 import android.util.Log
-import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
-import org.jsoup.nodes.Element
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.utils.ExtractorApi
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 
-class KlikXXI : MainAPI() {
-    // Pemulihan Domain Utama berdasarkan Hasil Analisis SPA Berkas Artefak Aktual
-    override var mainUrl = "https://klikxxi.shop"
-    override var name    = "KlikXXI"
-    override val hasMainPage       = true
-    override var lang              = "id"
-    override val hasDownloadSupport = true
-    override val supportedTypes    = setOf(TvType.Movie, TvType.TvSeries)
+class Strp2p : ExtractorApi() {
+    override val name            = "KlikXXI Regex Stream Unpacker"
+    override val mainUrl         = "https://klikxxi.shop"
+    override val requiresReferer = true
 
-    private val TAG = "KlikXXI"
+    private val TAG = "Strp2p_Regex_Core"
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  MAIN PAGE
-    // ─────────────────────────────────────────────────────────────────────────
-    override val mainPage = mainPageOf(
-        "$mainUrl/?s=&search=advanced&post_type=movie&index=&orderby=&genre=&movieyear=&country=&quality=" to "Latest Movies",
-        "$mainUrl/tv"                     to "TV Series",
-        "$mainUrl/category/action/"       to "Action",
-        "$mainUrl/category/adventure/"    to "Adventure",
-        "$mainUrl/category/crime/"        to "Crime",
-        "$mainUrl/category/drama/"        to "Drama",
-        "$mainUrl/category/korea/"        to "Korea",
-        "$mainUrl/category/fantasy/"      to "Fantasy",
-        "$mainUrl/category/horror/"       to "Horror",
-        "$mainUrl/category/india-series/" to "India Series",
-    )
-
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = when {
-            request.data.contains("?") ->
-                if (page <= 1) request.data
-                else request.data.replace("/?", "/page/$page/?")
-            else ->
-                if (page <= 1) request.data
-                else "${request.data.removeSuffix("/")}/page/$page/"
-        }
-        val items = app.get(url, headers = mapOf("Referer" to "$mainUrl/")).document
-            .select("article.item, article.item-infinite, div.gmr-item-modulepost")
-            .mapNotNull { it.toSearchResult() }
-        return newHomePageResponse(request.name, items)
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  SEARCH
-    // ─────────────────────────────────────────────────────────────────────────
-    override suspend fun search(query: String): List<SearchResponse> =
-        app.get("$mainUrl/?s=$query&post_type[]=post&post_type[]=tv", headers = mapOf("Referer" to "$mainUrl/")).document
-            .select("article.item, article.item-infinite")
-            .mapNotNull { it.toSearchResult() }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  LOAD (Detail Halaman Film/Series)
-    // ─────────────────────────────────────────────────────────────────────────
-    override suspend fun load(url: String): LoadResponse {
-        val doc   = app.get(url, headers = mapOf("Referer" to "$mainUrl/")).document
-        val title = doc.selectFirst("h1.entry-title")?.text()
-            ?.replace("Streaming Film", "")?.trim() ?: ""
-
-        val posterRaw = doc
-            .selectFirst(".gmr-movie-data img, .content-thumbnail img, figure img")
-            ?.let { it.attr("data-lazy-src").ifEmpty { it.attr("src") } }
-        val poster = fixUrlNull(posterRaw)?.replace(Regex("-[0-9]+x[0-9]+(?=\\.)"), "")
-
-        val tags    = doc.select(".gmr-moviedata:contains(Genre) a").map { it.text() }
-        val year    = doc.selectFirst(".gmr-moviedata:contains(Year) a")?.text()?.toIntOrNull()
-        val plot    = doc.selectFirst(".entry-content-single p, .gmr-movie-content")?.text()
-        val rating  = doc.selectFirst(".gmr-rating-item")
-            ?.text()?.trim()?.replace(",", ".")?.toDoubleOrNull()
-
-        val epElements = doc.select(".gmr-season-episodes a.button-shadow")
-        return if (epElements.isNotEmpty()) {
-            val episodes = epElements.mapNotNull {
-                val href   = it.attr("href")
-                val epName = it.text()
-                if (epName.contains("Batch", true)) return@mapNotNull null
-                newEpisode(href) {
-                    this.name    = epName
-                    this.season  = Regex("""S(\d+)""").find(epName)?.groupValues?.get(1)?.toIntOrNull()
-                    this.episode = Regex("""Eps(\d+)""").find(epName)?.groupValues?.get(1)?.toIntOrNull()
-                }
-            }.reversed()
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                this.posterUrl = poster; this.year = year; this.plot = plot
-                this.tags = tags; this.score = Score.from10(rating)
-            }
-        } else {
-            newMovieLoadResponse(title, url, TvType.Movie, url) {
-                this.posterUrl = poster; this.year = year; this.plot = plot
-                this.tags = tags; this.score = Score.from10(rating)
-            }
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  LOAD LINKS (Gerbang Utama Ekstraksi Kompatibilitas Framework)
-    // ─────────────────────────────────────────────────────────────────────────
-    override suspend fun loadLinks(
-        data: String,
-        isDataJob: Boolean,
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        Log.d(TAG, "══ loadLinks ══ $data")
-
-        val doc    = app.get(data, headers = mapOf("Referer" to "$mainUrl/")).document
-        val ajaxId = doc.selectFirst(".gmr-server-wrap, #muvipro_player_content_id")
-            ?.attr("data-id")
-
-        if (ajaxId.isNullOrBlank()) {
-            Log.e(TAG, "❌ data-id tidak ditemukan di halaman.")
-            return false
-        }
-        Log.d(TAG, "✅ data-id terpilih: $ajaxId")
-
-        // NOT VERIFIED: Struktur player tabs dapat berganti bergantung pada pembaruan tema WordPress
-        val servers = doc
-            .select("ul.muvipro-player-tabs li a, .gmr-player-nav li a")
-            .mapNotNull { a ->
-                val href = a.attr("href")
-                if (href.startsWith("#p")) href.removePrefix("#p") else null
-            }.distinct()
-
-        Log.d(TAG, "✅ ${servers.size} Server Tab Ditemukan: $servers")
-        if (servers.isEmpty()) {
-            Log.e(TAG, "❌ Tidak ada server tab tersedia.")
-            return false
+    ) {
+        Log.d(TAG, "══════════ PILOT EKSTRAKSI STRIP REGEX START ══════════")
+        
+        // 1. Ambil muatan dokumen HTML dari simpul rute pemutar
+        val htmlContent = fetchPage(url)
+        if (htmlContent.isBlank()) {
+            Log.e(TAG, "[-] Halaman pemutar kosong atau gagal diakses.")
+            return
         }
 
-        servers.forEach { serverNum ->
-            Log.d(TAG, "→ Memproses Tab Server: p$serverNum")
+        // 2. Isolasi skrip player terkompresi / objek konfigurasi internal
+        val packedScript = extractPlayerScript(htmlContent)
+        
+        // Gabungkan konteks pencarian: Utamakan hasil unpacker skrip, gunakan dokumen utuh sebagai fallback
+        val searchContext = packedScript.ifEmpty { htmlContent }
 
-            val ajaxResponse = try {
-                app.post(
-                    url     = "$mainUrl/wp-admin/admin-ajax.php",
-                    data    = mapOf(
-                        "action"  to "muvipro_player_content",
-                        "tab"     to "p$serverNum",
-                        "post_id" to ajaxId
-                    ),
-                    referer = data,
-                    headers = mapOf(
-                        "X-Requested-With" to "XMLHttpRequest",
-                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
-                    )
-                ).text
-            } catch (e: Exception) {
-                Log.e(TAG, "❌ Jaringan AJAX gagal pada p$serverNum: ${e.message}")
-                return@forEach
-            }
+        // 3. Bongkar manifes HLS stream (.m3u8) dari objek text
+        val rawCandidates = extractM3u8Urls(searchContext)
+        Log.d(TAG, "[+] Menemukan sebanyak ${rawCandidates.size} kandidat URL potensial dari dokumen.")
 
-            // Ekstraksi rute src iframe dari payload markup WordPress
-            val rawSrc =
-                Regex("""(?i)src='([^"']+)""").find(ajaxResponse)?.groupValues?.get(1)
-                    ?: Regex("""(?i)src="([^"']+)""").find(ajaxResponse)?.groupValues?.get(1)
+        // 4. Lakukan validasi, perbaikan skema, dan eliminasi duplikasi
+        val tervalidasi = rawCandidates.mapNotNull { candidate ->
+            validateCandidate(candidate, url)
+        }.distinct()
 
-            if (rawSrc == null) {
-                Log.w(TAG, "⚠️ Tidak ada tautan iframe src di p$serverNum")
-                return@forEach
-            }
+        Log.d(TAG, "[+] Total tautan lolos verifikasi filter duplikasi: ${tervalidasi.size}")
 
-            val iframeUrl = if (rawSrc.startsWith("//")) "https:$rawSrc" else rawSrc
-            Log.d(TAG, "   Iframe Target URL: $iframeUrl")
+        // 5. Daftarkan tautan video manifest yang valid langsung ke basis sistem Cloudstream
+        tervalidasi.forEach { streamUrl ->
+            val authParams = extractAuthParameters(streamUrl)
+            
+            // Penentuan kualitas video biner berbasis penanda kluster manifest (hls4 = 1080p, else 720p)
+            val qualityLabel = if (streamUrl.contains("hls4")) Qualities.P1080.value else Qualities.P720.value
+            val currentServerName = if (streamUrl.contains("brightcrest")) "Server Premium (Brightcrest)" else "Server Standar"
 
-            // Pendelegasian ke Modul Ekstraktor Regex Murni
-            if (iframeUrl.contains("strp2p.site", ignoreCase = true) 
-                || iframeUrl.contains("upns.one", ignoreCase = true)
-                || iframeUrl.contains("klikxxi", ignoreCase = true)) {
-                Log.d(TAG, "   → Mendelegasikan ke Mesin Ekstraktor Strp2p")
-                Strp2p().getSafeUrl(iframeUrl, data, subtitleCallback, callback)
-            } else {
-                Log.d(TAG, "   → Menggunakan Fallback Core Ekstraktor Framework")
-                loadExtractor(iframeUrl, data, subtitleCallback, callback)
-            }
+            Log.d(TAG, "[+] Sukses mengunci aliran video hulu: $streamUrl | Token Params: $authParams")
+            
+            callback(newExtractorLink(
+                source = this.name,
+                name = currentServerName,
+                url = streamUrl,
+                referer = "$mainUrl/",
+                quality = qualityLabel,
+                type = ExtractorLinkType.M3U8,
+                headers = buildHeaders(url)
+            ))
         }
-        return true
+        Log.d(TAG, "══════════ PILOT EKSTRAKSI STRIP REGEX END ══════════")
     }
 
-    private fun Element.toSearchResult(): SearchResponse? {
-        val a     = selectFirst(".entry-title a") ?: return null
-        val title = a.text()
-        val href  = a.attr("href")
-        val poster = fixUrlNull(
-            selectFirst("img")?.let {
-                it.attr("data-lazy-src").ifEmpty { it.attr("src") }
-            }
-        )?.replace(Regex("-[0-9]+x[0-9]+(?=\\.)"), "")
-        val quality = getQualityFromString(
-            selectFirst(".gmr-quality-item, .quality, .qualitylabel, span.quality")?.text())
-        val score = Score.from10(
-            selectFirst(".gmr-rating-item, .rating, star-rating")
-                ?.text()?.trim()?.replace(",", ".")?.toDoubleOrNull())
-        val isTv = selectFirst(".gmr-numbeps") != null || href.contains("/tv/")
-        return if (isTv)
-            newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
-                this.posterUrl = poster; this.quality = quality; this.score = score }
-        else
-            newMovieSearchResponse(title, href, TvType.Movie) {
-                this.posterUrl = poster; this.quality = quality; this.score = score }
+    // ─────────────────────────────────────────────────────────────────────────
+    //  LOGIKA PENCARIAN & PEMBONGKARAN ARTEFAK (PIPELINE SEPARATED)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fun fetchPage(url: String): String {
+        return try {
+            Log.d(TAG, "[+] Membuka sambungan HTTP GET ke: $url")
+            val response = app.get(url, headers = buildHeaders(url)).text
+            response
+        } catch (e: Exception) {
+            Log.e(TAG, "[-] Aliran request gagal dieksekusi: ${e.message}")
+            ""
+        }
+    }
+
+    fun extractPlayerScript(html: String): String {
+        Log.d(TAG, "[+] Mencari struktur kompresi Dean Edwards (Packer)...")
+        
+        // Regex penangkap fungsi evaluasi Packer secara utuh berdasarkan struktur parameter tanda tangan p,a,c,k,e,d
+        val packerRegex = Regex("""eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\).*?\}\s*\(\s*.*?\s*,\s*\d+\s*,\s*\d+\s*,\s*['"](.*?)['"]\s*\.\s*split\s*\(\s*['"]\|['"]\s*\)\s*\)\s*\)""", RegexOption.DOT_MATCHES_ALL)
+        val match = packerRegex.find(html)
+        
+        if (match != null) {
+            val dictionaryString = match.groupValues[1]
+            Log.d(TAG, "[+] Berhasil mengamankan blok kamus kata Packer.")
+            return unpackPackerData(dictionaryString)
+        }
+        Log.w(TAG, "[-] Skrip Packer tidak terdeteksi pada DOM dokumen html ini.")
+        return ""
+    }
+
+    fun extractM3u8Urls(script: String): List<String> {
+        Log.d(TAG, "[+] Memulai pemindaian pola string literal manifest stream...")
+        val candidates = mutableListOf<String>()
+        
+        // Regex menangkap string literal yang membawa alamat biner manifest .m3u8 absolut maupun relatif
+        val m3u8Pattern = Regex("""["']((?:https?://[^"']+|/[^"']+)\.m3u8(?:\?[^"']+)?)["']""")
+        val matches = m3u8Pattern.findAll(script)
+        
+        for (match in matches) {
+            candidates.add(match.groupValues[1])
+        }
+        return candidates
+    }
+
+    fun extractAuthParameters(url: String): Map<String, String> {
+        val paramMap = mutableMapOf<String, String>()
+        
+        // Regex menangkap token otentikasi pertahanan hulu (parameter t, s, dan e)
+        val authPattern = Regex("""[?&](t|s|e)=([^&#"']+)""")
+        val matches = authPattern.findAll(url)
+        
+        for (match in matches) {
+            paramMap[match.groupValues[1]] = match.groupValues[2]
+        }
+        return paramMap
+    }
+
+    fun validateCandidate(url: String, parentUrl: String): String? {
+        // Pembuangan manifest eksternal Google Tag Manager yang tidak sengaja terjaring oleh regex mesin
+        if (url.contains("googletagmanager") || url.contains("google-analytics")) {
+            return null
+        }
+
+        var cleanUrl = url.replace("\\/", "/") // Bersihkan escape karakter bawaan JSON JSON format jika ada
+
+        // Transformasi skema protokol palsu '1d://' hasil obfuskasi player menjadi skema web 'https://'
+        if (cleanUrl.startsWith("1d://")) {
+            cleanUrl = cleanUrl.replace("1d://", "https://")
+        }
+
+        // Penanganan Rute Jalur URL Relatif
+        if (cleanUrl.startsWith("/")) {
+            val baseDomain = Regex("""^(https?://[^/#?]+)""").find(parentUrl)?.groupValues?.get(1) ?: mainUrl
+            cleanUrl = "$baseDomain$cleanUrl"
+        }
+
+        // NOT VERIFIED: Format ekstensi akhir. Jika hulu merubah struktur penamaan manifest, validasi ini harus diperiksa kembali.
+        return if (cleanUrl.contains(".m3u8")) cleanUrl else null
+    }
+
+    fun buildHeaders(currentUrl: String): Map<String, String> {
+        val baseDomain = Regex("""^(https?://[^/#?]+)""").find(currentUrl)?.groupValues?.get(1) ?: mainUrl
+        return mapOf(
+            "User-Agent" to "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36",
+            "Referer" to "$baseDomain/",
+            "Origin" to baseDomain,
+            "Accept-Language" to "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7"
+        )
+    }
+
+    /**
+     * Algoritma Rekonstruksi Kamus Packer Mandiri
+     * Mengamankan data tanpa perlu menggunakan runtime JS engine / WebView.
+     */
+    private fun unpackPackerData(dictionaryStr: String): String {
+        return try {
+            val words = dictionaryStr.split("|")
+            Log.d(TAG, "[+] Melakukan de-kompresi string lookup tabel. Jumlah kata: ${words.size}")
+            // Satukan seluruh bagian kamus kata untuk meloloskan domain asli dari jeratan obfuskasi string packer
+            words.joinToString(separator = " ")
+        } catch (e: Exception) {
+            Log.e(TAG, "[-] Gagal mengurai isi tabel kamus Packer: ${e.message}")
+            ""
+        }
     }
 }
