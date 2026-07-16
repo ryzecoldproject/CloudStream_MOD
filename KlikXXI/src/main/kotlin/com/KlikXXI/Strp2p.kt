@@ -1,185 +1,207 @@
 package com.KlikXXI
 
 import android.util.Log
-import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.ExtractorApi
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.newExtractorLink
-import org.json.JSONObject
-import javax.crypto.Cipher
-import javax.crypto.spec.IvParameterSpec
-import javax.crypto.spec.SecretKeySpec
+import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.*
+import org.jsoup.nodes.Element
 
-class Strp2p : ExtractorApi() {
-    override val name            = "Strp2p"
-    override val mainUrl         = "klikxxi.shop"
-    override val requiresReferer = true
+class KlikXXI : MainAPI() {
+    // Pemulihan Domain Utama berdasarkan Hasil Analisis SPA Berkas Artefak Aktual
+    override var mainUrl = "https://klikxxi.shop"
+    override var name    = "KlikXXI"
+    override val hasMainPage       = true
+    override var lang              = "id"
+    override val hasDownloadSupport = true
+    override val supportedTypes    = setOf(TvType.Movie, TvType.TvSeries)
 
-    private val AES_KEY = "kiemtienmua911ca"
-    private val AES_IV  = "1234567890oiuytr"
-    private val API_W   = "360"
-    private val API_H   = "800"
-    private val API_R   = "klikxxi.me"
+    private val TAG = "KlikXXI"
 
-    private val UA = "Mozilla/5.0 (Linux; Android 10; Mobile) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/120.0.0.0 Mobile Safari/537.36"
+    // ─────────────────────────────────────────────────────────────────────────
+    //  MAIN PAGE
+    // ─────────────────────────────────────────────────────────────────────────
+    override val mainPage = mainPageOf(
+        "$mainUrl/?s=&search=advanced&post_type=movie&index=&orderby=&genre=&movieyear=&country=&quality=" to "Latest Movies",
+        "$mainUrl/tv"                     to "TV Series",
+        "$mainUrl/category/action/"       to "Action",
+        "$mainUrl/category/adventure/"    to "Adventure",
+        "$mainUrl/category/crime/"        to "Crime",
+        "$mainUrl/category/drama/"        to "Drama",
+        "$mainUrl/category/korea/"        to "Korea",
+        "$mainUrl/category/fantasy/"      to "Fantasy",
+        "$mainUrl/category/horror/"       to "Horror",
+        "$mainUrl/category/india-series/" to "India Series",
+    )
 
-    private val TAG = "Strp2p_v8"
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val url = when {
+            request.data.contains("?") ->
+                if (page <= 1) request.data
+                else request.data.replace("/?", "/page/$page/?")
+            else ->
+                if (page <= 1) request.data
+                else "${request.data.removeSuffix("/")}/page/$page/"
+        }
+        val items = app.get(url, headers = mapOf("Referer" to "$mainUrl/")).document
+            .select("article.item, article.item-infinite, div.gmr-item-modulepost")
+            .mapNotNull { it.toSearchResult() }
+        return newHomePageResponse(request.name, items)
+    }
 
-    override suspend fun getUrl(
-        url: String,
-        referer: String?,
+    // ─────────────────────────────────────────────────────────────────────────
+    //  SEARCH
+    // ─────────────────────────────────────────────────────────────────────────
+    override suspend fun search(query: String): List<SearchResponse> =
+        app.get("$mainUrl/?s=$query&post_type[]=post&post_type[]=tv", headers = mapOf("Referer" to "$mainUrl/")).document
+            .select("article.item, article.item-infinite")
+            .mapNotNull { it.toSearchResult() }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  LOAD (Detail Halaman Film/Series)
+    // ─────────────────────────────────────────────────────────────────────────
+    override suspend fun load(url: String): LoadResponse {
+        val doc   = app.get(url, headers = mapOf("Referer" to "$mainUrl/")).document
+        val title = doc.selectFirst("h1.entry-title")?.text()
+            ?.replace("Streaming Film", "")?.trim() ?: ""
+
+        val posterRaw = doc
+            .selectFirst(".gmr-movie-data img, .content-thumbnail img, figure img")
+            ?.let { it.attr("data-lazy-src").ifEmpty { it.attr("src") } }
+        val poster = fixUrlNull(posterRaw)?.replace(Regex("-[0-9]+x[0-9]+(?=\\.)"), "")
+
+        val tags    = doc.select(".gmr-moviedata:contains(Genre) a").map { it.text() }
+        val year    = doc.selectFirst(".gmr-moviedata:contains(Year) a")?.text()?.toIntOrNull()
+        val plot    = doc.selectFirst(".entry-content-single p, .gmr-movie-content")?.text()
+        val rating  = doc.selectFirst(".gmr-rating-item")
+            ?.text()?.trim()?.replace(",", ".")?.toDoubleOrNull()
+
+        val epElements = doc.select(".gmr-season-episodes a.button-shadow")
+        return if (epElements.isNotEmpty()) {
+            val episodes = epElements.mapNotNull {
+                val href   = it.attr("href")
+                val epName = it.text()
+                if (epName.contains("Batch", true)) return@mapNotNull null
+                newEpisode(href) {
+                    this.name    = epName
+                    this.season  = Regex("""S(\d+)""").find(epName)?.groupValues?.get(1)?.toIntOrNull()
+                    this.episode = Regex("""Eps(\d+)""").find(epName)?.groupValues?.get(1)?.toIntOrNull()
+                }
+            }.reversed()
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                this.posterUrl = poster; this.year = year; this.plot = plot
+                this.tags = tags; this.score = Score.from10(rating)
+            }
+        } else {
+            newMovieLoadResponse(title, url, TvType.Movie, url) {
+                this.posterUrl = poster; this.year = year; this.plot = plot
+                this.tags = tags; this.score = Score.from10(rating)
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  LOAD LINKS (Gerbang Utama Ekstraksi Kompatibilitas Framework)
+    // ─────────────────────────────────────────────────────────────────────────
+    override suspend fun loadLinks(
+        data: String,
+        isDataJob: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ) {
-        Log.d(TAG, "══════════ STRP2P v8 START ══════════")
-        val baseDomain = Regex("""^(https?://[^/#?]+)""").find(url)?.groupValues?.get(1) ?: mainUrl
-        val videoId = Regex("""[/#]([A-Za-z0-9]{4,})$""").find(url.substringBefore("?"))?.groupValues?.get(1)?.trim() ?: return
+    ): Boolean {
+        Log.d(TAG, "══ loadLinks ══ $data")
 
-        val apiUrl = "$baseDomain/api/v1/video?id=$videoId&w=$API_W&h=$API_H&r=$API_R"
-        val playerHeaders = mapOf("User-Agent" to UA, "Referer" to "$baseDomain/", "Origin" to baseDomain)
+        val doc    = app.get(data, headers = mapOf("Referer" to "$mainUrl/")).document
+        val ajaxId = doc.selectFirst(".gmr-server-wrap, #muvipro_player_content_id")
+            ?.attr("data-id")
 
-        val resp = try { app.get(apiUrl, headers = playerHeaders) } catch (e: Exception) { return }
-        if (resp.code != 200) return
+        if (ajaxId.isNullOrBlank()) {
+            Log.e(TAG, "❌ data-id tidak ditemukan di halaman.")
+            return false
+        }
+        Log.d(TAG, "✅ data-id terpilih: $ajaxId")
 
-        val hexStr = resp.text.trim()
-        if (hexStr.isBlank() || hexStr.length % 2 != 0) return
+        // NOT VERIFIED: Struktur player tabs dapat berganti bergantung pada pembaruan tema WordPress
+        val servers = doc
+            .select("ul.muvipro-player-tabs li a, .gmr-player-nav li a")
+            .mapNotNull { a ->
+                val href = a.attr("href")
+                if (href.startsWith("#p")) href.removePrefix("#p") else null
+            }.distinct()
 
-        val rawJson = try { decryptAesCbc(hexStr, AES_KEY.toByteArray(), AES_IV.toByteArray()) } catch (e: Exception) { return }
-        val jsonObj = try { JSONObject(rawJson) } catch (e: Exception) { null }
-
-        val cfRaw     = Regex(""""cf"\s*:\s*"([^"]+)"""").find(rawJson)?.groupValues?.get(1)?.unescapeJsonSlashes()
-        val sourceRaw = Regex(""""source"\s*:\s*"([^"]+)"""").find(rawJson)?.groupValues?.get(1)?.unescapeJsonSlashes()
-
-        val cfHost  = cfRaw?.let { Regex("""^(https?://[^/]+)""").find(it)?.groupValues?.get(1) }
-        val srcPath = sourceRaw?.let { 
-            val idx = it.indexOf("/", it.indexOf("://") + 3)
-            if (idx >= 0) it.substring(idx) else null
+        Log.d(TAG, "✅ ${servers.size} Server Tab Ditemukan: $servers")
+        if (servers.isEmpty()) {
+            Log.e(TAG, "❌ Tidak ada server tab tersedia.")
+            return false
         }
 
-        val swappedUrl = if (cfHost != null && srcPath != null && sourceRaw != null && isRawIp(sourceRaw)) {
-            "$cfHost$srcPath"
-        } else null
+        servers.forEach { serverNum ->
+            Log.d(TAG, "→ Memproses Tab Server: p$serverNum")
 
-        // ██ STRATEGI v8: PARSE MASTER M3U8 LALU EMIT SEBAGAI EXTRACTOR LINK BIASA ██
-        if (swappedUrl != null && cfHost != null) {
-            try {
-                Log.d(TAG, "▶▶▶ [v8] Membaca Master Playlist: $swappedUrl")
-                val masterContent = app.get(swappedUrl, headers = playerHeaders).text
-                
-                if (masterContent.contains("#EXT-X-STREAM-INF")) {
-                    var pendingH = -1
-                    masterContent.lines().forEach { line ->
-                        val trimmed = line.trim()
-                        if (trimmed.startsWith("#EXT-X-STREAM-INF")) {
-                            pendingH = Regex("""RESOLUTION=\d+x(\d+)""").find(trimmed)?.groupValues?.get(1)?.toIntOrNull() ?: -1
-                        } else if (!trimmed.startsWith("#") && trimmed.isNotBlank() && pendingH != -1) {
-                            // Ekstrak URL varian dan timpa ke CF host jika ternyata raw IP absolut
-                            val variantUrl = resolveAndRewrite(trimmed, swappedUrl, cfHost)
-                            val label = if (pendingH > 0) "${pendingH}p" else "Auto"
-                            
-                            Log.d(TAG, "✅ [v8] Emit Variant $label: $variantUrl")
-                            callback(newExtractorLink(name, "Strp2p $label", variantUrl, ExtractorLinkType.M3U8) {
-                                this.referer = "$baseDomain/"
-                                this.quality = if (pendingH > 0) pendingH else Qualities.Unknown.value
-                                this.headers = playerHeaders
-                            })
-                            pendingH = -1
-                        }
-                    }
-                    return
-                } else {
-                    // Jika M3U8 langsung berisi segmen (bukan master)
-                    Log.d(TAG, "✅ [v8] Emit Direct Variant: $swappedUrl")
-                    callback(newExtractorLink(name, "Strp2p Auto", swappedUrl, ExtractorLinkType.M3U8) {
-                        this.referer = "$baseDomain/"
-                        this.quality = Qualities.Unknown.value
-                        this.headers = playerHeaders
-                    })
-                    return
-                }
+            val ajaxResponse = try {
+                app.post(
+                    url     = "$mainUrl/wp-admin/admin-ajax.php",
+                    data    = mapOf(
+                        "action"  to "muvipro_player_content",
+                        "tab"     to "p$serverNum",
+                        "post_id" to ajaxId
+                    ),
+                    referer = data,
+                    headers = mapOf(
+                        "X-Requested-With" to "XMLHttpRequest",
+                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+                    )
+                ).text
             } catch (e: Exception) {
-                Log.e(TAG, "⚠️ [v8] Gagal parse master, fallback ke raw... ${e.message}")
+                Log.e(TAG, "❌ Jaringan AJAX gagal pada p$serverNum: ${e.message}")
+                return@forEach
+            }
+
+            // Ekstraksi rute src iframe dari payload markup WordPress
+            val rawSrc =
+                Regex("""(?i)src='([^"']+)""").find(ajaxResponse)?.groupValues?.get(1)
+                    ?: Regex("""(?i)src="([^"']+)""").find(ajaxResponse)?.groupValues?.get(1)
+
+            if (rawSrc == null) {
+                Log.w(TAG, "⚠️ Tidak ada tautan iframe src di p$serverNum")
+                return@forEach
+            }
+
+            val iframeUrl = if (rawSrc.startsWith("//")) "https:$rawSrc" else rawSrc
+            Log.d(TAG, "   Iframe Target URL: $iframeUrl")
+
+            // Pendelegasian ke Modul Ekstraktor Regex Murni
+            if (iframeUrl.contains("strp2p.site", ignoreCase = true) 
+                || iframeUrl.contains("upns.one", ignoreCase = true)
+                || iframeUrl.contains("klikxxi", ignoreCase = true)) {
+                Log.d(TAG, "   → Mendelegasikan ke Mesin Ekstraktor Strp2p")
+                Strp2p().getSafeUrl(iframeUrl, data, subtitleCallback, callback)
+            } else {
+                Log.d(TAG, "   → Menggunakan Fallback Core Ekstraktor Framework")
+                loadExtractor(iframeUrl, data, subtitleCallback, callback)
             }
         }
+        return true
+    }
 
-        // ██ FALLBACK TIKTOK CDN (JIKA DOMAIN SWAPPING GAGAL) ██
-        val tiktokPath = Regex(""""hlsVideoTiktok"\s*:\s*"([^"]+)"""").find(rawJson)?.groupValues?.get(1)?.unescapeJsonSlashes()?.takeIf { ".m3u8" in it }
-        if (tiktokPath != null) {
-            val cdnBase = extractTiktokCdnBase(jsonObj, rawJson)
-            val tiktokUrl = when {
-                tiktokPath.startsWith("http") -> tiktokPath
-                tiktokPath.startsWith("/")    -> "$cdnBase$tiktokPath"
-                else                          -> "$cdnBase/$tiktokPath"
+    private fun Element.toSearchResult(): SearchResponse? {
+        val a     = selectFirst(".entry-title a") ?: return null
+        val title = a.text()
+        val href  = a.attr("href")
+        val poster = fixUrlNull(
+            selectFirst("img")?.let {
+                it.attr("data-lazy-src").ifEmpty { it.attr("src") }
             }
-            if (!isRawIp(tiktokUrl)) {
-                Log.d(TAG, "✅ [v8] Emit TikTok CDN Fallback: $tiktokUrl")
-                callback(newExtractorLink(name, "Strp2p [TikTok CDN]", tiktokUrl, ExtractorLinkType.M3U8) {
-                    this.referer = "$baseDomain/"
-                    this.quality = Qualities.Unknown.value
-                    this.headers = playerHeaders
-                })
-            }
-        }
-    }
-
-    private fun resolveAndRewrite(url: String, baseUrl: String, cfHost: String): String {
-        val fullUrl = when {
-            url.startsWith("http") -> url
-            url.startsWith("//") -> "https:$url"
-            url.startsWith("/") -> {
-                val host = Regex("""^(https?://[^/]+)""").find(baseUrl)?.groupValues?.get(1) ?: cfHost
-                "$host$url"
-            }
-            else -> "${baseUrl.substringBeforeLast("/")}/$url"
-        }
-        
-        // Proteksi ekstra: pastikan tidak ada M3U8 varian yg pakai Raw IP
-        if (isRawIp(fullUrl)) {
-            val path = fullUrl.substringAfter("://").substringAfter("/", "")
-            return "$cfHost/$path"
-        }
-        return fullUrl
-    }
-
-    private fun isRawIp(url: String): Boolean {
-        val host = Regex("""https?://([^/:]+)""").find(url)?.groupValues?.get(1) ?: return false
-        return host.matches(Regex("""\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"""))
-    }
-
-    private fun extractTiktokCdnBase(jsonObj: JSONObject?, rawJson: String): String {
-        try {
-            val scRaw = jsonObj?.optString("streamingConfig") ?: ""
-            if (scRaw.isNotBlank()) {
-                val domain = JSONObject(scRaw).optJSONObject("adjust")?.optJSONObject("Tiktok")?.optString("domain", "") ?: ""
-                if (domain.isNotBlank()) return if (domain.startsWith("http")) domain.trimEnd('/') else "https://${domain.trimEnd('/')}"
-            }
-        } catch (_: Exception) {}
-
-        val m = Regex(""""Tiktok"\s*:\s*\{[^}]*"domain"\s*:\s*"([^"]+)"""").find(rawJson)?.groupValues?.get(1)
-        if (!m.isNullOrBlank()) return if (m.startsWith("http")) m.trimEnd('/') else "https://${m.trimEnd('/')}"
-
-        try {
-            val cfDomain = jsonObj?.optJSONObject("metric")?.optString("cfDomain", "") ?: ""
-            if (cfDomain.isNotBlank()) return "https://soq.$cfDomain"
-        } catch (_: Exception) {}
-
-        return "https://soq.corporateoperations.sbs"
-    }
-
-    private fun String.unescapeJsonSlashes() = replace("\\/", "/")
-
-    private fun String.decodeHex(): ByteArray {
-        return ByteArray(length / 2) { i -> substring(i * 2, i * 2 + 2).toInt(16).toByte() }
-    }
-
-    private fun decryptAesCbc(hex: String, key: ByteArray, iv: ByteArray): String {
-        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-        return String(cipher.doFinal(hex.decodeHex()), Charsets.UTF_8)
+        )?.replace(Regex("-[0-9]+x[0-9]+(?=\\.)"), "")
+        val quality = getQualityFromString(
+            selectFirst(".gmr-quality-item, .quality, .qualitylabel, span.quality")?.text())
+        val score = Score.from10(
+            selectFirst(".gmr-rating-item, .rating, star-rating")
+                ?.text()?.trim()?.replace(",", ".")?.toDoubleOrNull())
+        val isTv = selectFirst(".gmr-numbeps") != null || href.contains("/tv/")
+        return if (isTv)
+            newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
+                this.posterUrl = poster; this.quality = quality; this.score = score }
+        else
+            newMovieSearchResponse(title, href, TvType.Movie) {
+                this.posterUrl = poster; this.quality = quality; this.score = score }
     }
 }
