@@ -1,4 +1,4 @@
-package com.michat88
+package com.adixtream
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -15,7 +15,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 /**
  * ================== IDLIX SOURCE ==================
  *
- * Sumber tambahan untuk AdiFilmSemi. Katalog, detail, pencarian, dan metadata
+ * Sumber tambahan untuk AdiXtream. Katalog, detail, pencarian, dan metadata
  * tetap sepenuhnya dari TMDB; berkas ini HANYA menghasilkan ExtractorLink dan
  * SubtitleFile; source playback aktif lainnya hanya MovieBox.
  *
@@ -31,14 +31,14 @@ import okhttp3.RequestBody.Companion.toRequestBody
  *       -> /api/watch/session/claim (claim)
  *       -> Majorplay /api/play      (master m3u8 + subtitle)
  *
- * DIAGNOSTIK: filter logcat dengan tag "AdiFilmSemiIDX".
+ * DIAGNOSTIK: filter logcat dengan tag "AdiXtreamIDX".
  *
  * Seluruh DTO sengaja nested di dalam object ini supaya nama seperti Cast dan
- * Genre tidak bentrok dengan data class TMDB milik AdiFilmSemi.
+ * Genre tidak bentrok dengan data class TMDB milik AdiXtream.
  */
-object AdiFilmSemiIdlix {
+object AdiXtreamIdlix {
 
-    private const val IDX_TAG = "AdiFilmSemiIDX"
+    private const val IDX_TAG = "AdiXtreamIDX"
 
     private const val MAIN_URL = "https://z2.idlixku.com"
 
